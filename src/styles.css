@@ -23,6 +23,7 @@
   --ok-soft: #e6f6ed;
   --danger: #b91c1c;
   --danger-soft: #fdecec;
+  --heart: #e11d48;
   --ring: #2563eb;
 }
 
@@ -43,6 +44,7 @@
   --ok-soft: #12291c;
   --danger: #f87171;
   --danger-soft: #2a1414;
+  --heart: #fb7185;
   --ring: #8ab4ff;
 }
 
@@ -710,8 +712,11 @@ input[type='text']:hover {
 /* Footer */
 
 .foot {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px 28px;
   margin-top: 30px;
   padding-top: 22px;
   padding-bottom: 36px;
@@ -720,9 +725,91 @@ input[type='text']:hover {
   font-size: 13px;
 }
 
+.foot-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.foot-copy p {
+  margin: 0;
+}
+
 .foot-note {
   font-size: 12px;
   opacity: 0.85;
+}
+
+.credit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding-bottom: 2px;
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.credit-heart {
+  display: inline-flex;
+  color: var(--heart);
+  animation: heart-beat 3.8s ease-in-out infinite;
+}
+
+.credit-heart svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+  transition:
+    transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    filter 220ms ease;
+}
+
+.credit:hover .credit-heart svg {
+  transform: scale(1.18);
+  filter: drop-shadow(0 2px 5px rgba(225, 29, 72, 0.35));
+}
+
+.credit-name {
+  color: var(--ink);
+  font-weight: 600;
+  text-decoration: none;
+  background-image: linear-gradient(var(--primary), var(--primary));
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0% 1.5px;
+  transition:
+    background-size 260ms cubic-bezier(0.4, 0, 0.2, 1),
+    color 160ms ease;
+}
+
+.credit-name:hover {
+  color: var(--primary);
+  background-size: 100% 1.5px;
+}
+
+.credit-name:focus-visible {
+  color: var(--primary);
+  background-size: 100% 1.5px;
+}
+
+@keyframes heart-beat {
+  0%,
+  32%,
+  100% {
+    transform: scale(1);
+  }
+  8% {
+    transform: scale(1.14);
+  }
+  16% {
+    transform: scale(0.97);
+  }
+  24% {
+    transform: scale(1.08);
+  }
 }
 
 /* Responsive */
@@ -769,6 +856,12 @@ input[type='text']:hover {
 
   .progress-name {
     max-width: 58%;
+  }
+
+  .foot {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
   }
 }
 
