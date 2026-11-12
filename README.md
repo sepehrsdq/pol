@@ -8,6 +8,8 @@ Send a file straight from one browser to another. Pick a file, get four words, h
 
 **Live demo:** https://qqsp.ir/ — the page and the signaling server are the same origin, so there is nothing to configure.
 
+> **Same network for now.** Both devices have to be on the same network. Crossing from one network to another needs a TURN relay, and no relay is wired up yet — that is the next milestone.
+
 ## What it does
 
 - **Four-word code** — four Persian words from a 64-word list, easy to read over the phone and type on a mobile keyboard.
@@ -63,7 +65,7 @@ The sender creates a data channel and offers; the receiver answers. Files are sl
 
 Known limits:
 
-- STUN is built in, so most home networks connect directly. Without a TURN relay, symmetric NAT and restrictive firewalls can still block the path.
+- STUN is built in, so most home networks connect directly. Without a TURN relay, symmetric NAT and restrictive firewalls can still block the path — treat two different networks as unsupported for now.
 - One file per session; folders and resume-after-disconnect are not built yet.
 - The file is assembled in the tab's memory, so multi-gigabyte transfers are not practical yet.
 - If the signal server is malicious it could theoretically sit in the middle. The code does not protect against that yet.
@@ -74,6 +76,8 @@ Known limits:
 
 دموی زنده: https://qqsp.ir/
 
+**فعلاً هر دو دستگاه باید روی یک شبکه باشند.** عبور از دو شبکهٔ جدا به رلهٔ TURN نیاز دارد و رله هنوز وصل نیست؛ نسخهٔ بعد همین است.
+
 ```bash
 npm install
 npm run dev:signal   # ترمینال اول
@@ -81,7 +85,7 @@ npm run dev          # ترمینال دوم
 ```
 
 - کد چهارکلمه‌ای فقط شناسهٔ اتاق است، نه رمز. رمزنگاری از خود WebRTC می‌آید.
-- STUN داخل خود برنامه است، پس بیشتر شبکه‌های خانگی مستقیم وصل می‌شوند. بدون رلهٔ TURN، شبکه‌های symmetric NAT و فایروال سخت ممکن است مسیر مستقیم را ببندند.
+- STUN داخل خود برنامه است، پس بیشتر شبکه‌های خانگی مستقیم وصل می‌شوند. بدون رلهٔ TURN، دو شبکهٔ جدا فعلاً پشتیبانی نمی‌شوند.
 - هر نشست یک فایل؛ پوشه و ادامهٔ انتقال بعد از قطعی هنوز نیست.
 - فایل در حافظهٔ تب جمع می‌شود؛ برای فایل چند گیگابایتی مناسب نیست.
 - سلامت فایل با SHA-256 بررسی می‌شود و در پایان، نتیجه روی هر دو طرف دیده می‌شود.

@@ -316,6 +316,183 @@ p {
   font-weight: 600;
 }
 
+/* Network note */
+
+.net-note {
+  display: grid;
+  gap: 18px;
+  margin-top: 18px;
+  padding: clamp(16px, 2.4vw, 24px);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+}
+
+.net-head {
+  display: grid;
+  gap: 6px;
+}
+
+.net-head h2 {
+  font-size: clamp(1rem, 0.94rem + 0.3vw, 1.16rem);
+  font-weight: 700;
+  line-height: 1.5;
+  text-wrap: balance;
+}
+
+.net-head p {
+  max-width: 62ch;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.net-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.net-case {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 14px;
+  background: var(--seg);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.net-art {
+  display: block;
+  width: 100%;
+  max-width: 380px;
+  height: auto;
+  margin: 0 auto;
+}
+
+.net-art .dev {
+  fill: var(--bg);
+  stroke: var(--line-strong);
+  stroke-width: 2;
+}
+
+.net-art .dev-screen {
+  fill: var(--primary-soft);
+}
+
+.net-art .wifi {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+
+.net-art .wifi-dot {
+  fill: var(--muted);
+}
+
+.net-art .link {
+  stroke: var(--ok);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.net-art .badge-ok {
+  fill: var(--ok-soft);
+  stroke: var(--ok);
+  stroke-width: 2;
+  transform-origin: 150px 98px;
+}
+
+.net-art .tick {
+  fill: none;
+  stroke: var(--ok);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.is-ok .badge-ok {
+  animation: net-pulse 3.4s ease-in-out infinite;
+}
+
+.net-case.is-soon .link {
+  stroke: var(--muted);
+  stroke-dasharray: 4 6;
+}
+
+.net-art .badge-no {
+  fill: var(--panel);
+  stroke: var(--muted);
+  stroke-width: 2;
+}
+
+.net-art .cross {
+  stroke: var(--muted);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+
+.net-case figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.net-name {
+  font-size: 0.94rem;
+  font-weight: 700;
+}
+
+.net-desc {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.net-chip {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1.8;
+  white-space: nowrap;
+}
+
+.net-chip.is-ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.net-chip.is-soon {
+  color: var(--accent);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+}
+
+@keyframes net-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(1.09);
+  }
+}
+
+@media (max-width: 560px) {
+  .net-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .is-ok .badge-ok {
+    animation: none;
+  }
+}
+
 /* Panel */
 
 .panel {
