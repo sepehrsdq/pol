@@ -51,7 +51,6 @@ index.html          one page, no UI framework
 src/lib/            pure logic: word code, SHA-256, formatting
 src/net/            signaling client and WebRTC transfer
 server/signal.mjs   rooms and SDP/ICE relay (~150 lines)
-doc/                project docs (Persian)
 ```
 
 The sender creates a data channel and offers; the receiver answers. Files are sliced into 64 KB chunks with backpressure at 4 MB buffered, then verified with SHA-256. A room code is only a room identifier — encryption comes from DTLS, and a key derived from the code (SPAKE2) is planned for v0.7.
@@ -80,8 +79,6 @@ npm run dev          # ترمینال دوم
 - هر نشست یک فایل؛ پوشه و ادامهٔ انتقال بعد از قطعی هنوز نیست.
 - فایل در حافظهٔ تب جمع می‌شود؛ برای فایل چند گیگابایتی مناسب نیست.
 - سلامت فایل با SHA-256 بررسی می‌شود و در پایان، نتیجه روی هر دو طرف دیده می‌شود.
-
-مستندات داخلی پروژه (معماری، تصمیم‌ها، تسک‌ها) در پوشهٔ `doc/` و فارسی است.
 
 ## License
 

@@ -3,6 +3,10 @@ dist/
 coverage/
 .vite/
 
+# local-only project memory: docs, agent brief, internal deploy notes
+/doc/
+/AGENTS.md
+
 # local secrets — signal url, ICE servers, tokens
 .env
 .env.*
