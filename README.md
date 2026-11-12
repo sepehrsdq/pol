@@ -6,6 +6,8 @@
 
 Send a file straight from one browser to another. Pick a file, get four words, hand them to the other side, and the transfer starts. Bytes travel over a WebRTC data channel: nothing is uploaded, no account is needed, and the server never holds the file.
 
+**Live demo:** https://pol-production-f2ccd148.up.railway.app/ — the page and the signaling server are the same origin, so there is nothing to configure.
+
 ## What it does
 
 - **Four-word code** — four Persian words from a 64-word list, easy to read over the phone and type on a mobile keyboard.
@@ -64,6 +66,8 @@ Known limits:
 ## فارسی
 
 **پل** یک ایردراپ مرورگری است: فایل را روی یک دستگاه انتخاب می‌کنی، یک کد چهارکلمه‌ای می‌گیری، طرف مقابل کد را می‌زند و فایل مستقیم بین دو مرورگر جابه‌جا می‌شود. هیچ فایلی آپلود نمی‌شود و هیچ اکانتی لازم نیست.
+
+دموی زنده: https://pol-production-f2ccd148.up.railway.app/
 
 ```bash
 npm install
