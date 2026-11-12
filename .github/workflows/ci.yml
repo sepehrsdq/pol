@@ -17,3 +17,23 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t pol:test .
+      - name: Smoke test the container
+        run: |
+          docker run -d --name pol -p 8787:8787 -e PORT=8787 pol:test
+          for attempt in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:8787/healthz | grep -q '^ok$'; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8787/healthz | grep -q '^ok$'
+          curl -fsS http://127.0.0.1:8787/ | grep -q 'پل'
+          docker logs pol
+          docker rm -f pol
