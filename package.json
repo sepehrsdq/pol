@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "dev:signal": "node server/signal.mjs",
+    "start": "node server/signal.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",

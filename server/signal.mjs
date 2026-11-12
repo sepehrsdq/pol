@@ -10,7 +10,10 @@
 //   s -> c  { t: "peer-left" }
 //   s -> c  { t: "error", message }
 //   both    { t: "s", data }      opaque relay for SDP/ICE
+//
+// Also serves GET /healthz for platform health checks.
 
+import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -63,8 +66,18 @@ function leave(ws) {
   if (!room.sender && !room.receiver) rooms.delete(key);
 }
 
+const server = createServer((request, response) => {
+  if (request.url === '/healthz') {
+    response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end('ok');
+    return;
+  }
+  response.writeHead(426, { 'content-type': 'text/plain; charset=utf-8' });
+  response.end('expected a websocket upgrade at /signal');
+});
+
 const wss = new WebSocketServer({
-  port: PORT,
+  server,
   path: '/signal',
   maxPayload: 64 * 1024,
 });
@@ -146,4 +159,6 @@ const sweeper = setInterval(() => {
 
 wss.on('close', () => clearInterval(sweeper));
 
-console.log(`pol signal listening on ws://127.0.0.1:${PORT}/signal`);
+server.listen(PORT, () => {
+  console.log(`pol signal listening on :${PORT} (ws path /signal, health /healthz)`);
+});

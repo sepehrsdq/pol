@@ -303,7 +303,10 @@ function connect(role: TransferRole, room: string, file: File | null): void {
       if (!busy) return;
       busy = false;
       setStatus(null);
-      showAlert('ارتباط با سرور سیگنالینگ قطع شد. صفحه را نوسازی کن و دوباره تلاش کن.');
+      showAlert(
+        'ارتباط با سرور سیگنالینگ برقرار نشد. اگر نسخهٔ دمو تازه بیدار می‌شود، چند ثانیه صبر کن و دوباره بزن.',
+        () => connect(role, room, file),
+      );
     },
   });
 
