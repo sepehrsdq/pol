@@ -135,12 +135,19 @@ function serveClient(request, response) {
 }
 
 const server = createServer((request, response) => {
-  if (request.url === '/healthz') {
+  let pathname = '/';
+  try {
+    pathname = new URL(request.url ?? '/', 'http://localhost').pathname;
+  } catch {
+    // Keep the root fallback for malformed URLs.
+  }
+
+  if (pathname === '/healthz') {
     response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
     response.end('ok');
     return;
   }
-  if (request.url === '/ice') {
+  if (pathname === '/ice') {
     if (request.method === 'OPTIONS') {
       response.writeHead(204, {
         'access-control-allow-origin': '*',
