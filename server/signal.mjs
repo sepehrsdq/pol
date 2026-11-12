@@ -1,7 +1,7 @@
-// Signaling server for Pol.
+// Signaling server for Pol, with the built client served from the same origin.
 //
-// It only pairs two browsers by room code and relays SDP/ICE messages.
-// File bytes never pass through here, and nothing is persisted.
+// It pairs two browsers by room code, relays SDP/ICE, and serves dist/ when
+// it exists. File bytes never pass through here, and nothing is persisted.
 //
 // Protocol (JSON over WebSocket):
 //   c -> s  { t: "join", room, role: "sender" | "receiver" }
@@ -11,14 +11,33 @@
 //   s -> c  { t: "error", message }
 //   both    { t: "s", data }      opaque relay for SDP/ICE
 //
-// Also serves GET /healthz for platform health checks.
+// HTTP: GET /healthz for platform checks, everything else from dist/.
 
+import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { extname, resolve, sep } from 'node:path';
 import { WebSocketServer } from 'ws';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const HEARTBEAT_MS = 30_000;
 const MAX_IDLE_MS = 2 * 60 * 60 * 1000;
+const DIST_DIR = resolve(process.cwd(), 'dist');
+
+const MIME = new Map([
+  ['.html', 'text/html; charset=utf-8'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.mjs', 'text/javascript; charset=utf-8'],
+  ['.css', 'text/css; charset=utf-8'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.svg', 'image/svg+xml'],
+  ['.png', 'image/png'],
+  ['.jpg', 'image/jpeg'],
+  ['.webp', 'image/webp'],
+  ['.ico', 'image/x-icon'],
+  ['.woff2', 'font/woff2'],
+  ['.woff', 'font/woff'],
+  ['.map', 'application/json; charset=utf-8'],
+]);
 
 /** @type {Map<string, { sender: any, receiver: any, createdAt: number }>} */
 const rooms = new Map();
@@ -66,14 +85,66 @@ function leave(ws) {
   if (!room.sender && !room.receiver) rooms.delete(key);
 }
 
+function sendFile(request, response, filePath) {
+  const info = statSync(filePath);
+  const ext = extname(filePath).toLowerCase();
+  const immutable = filePath.startsWith(resolve(DIST_DIR, 'assets') + sep);
+  response.writeHead(200, {
+    'content-type': MIME.get(ext) ?? 'application/octet-stream',
+    'content-length': info.size,
+    'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+    'x-content-type-options': 'nosniff',
+  });
+  if (request.method === 'HEAD') {
+    response.end();
+    return;
+  }
+  createReadStream(filePath).pipe(response);
+}
+
+function serveClient(request, response) {
+  let pathname;
+  try {
+    pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://localhost').pathname);
+  } catch {
+    response.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end('bad request');
+    return;
+  }
+
+  const candidate = resolve(DIST_DIR, `.${pathname}`);
+  const inside = candidate === DIST_DIR || candidate.startsWith(DIST_DIR + sep);
+  if (!inside) {
+    response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end('forbidden');
+    return;
+  }
+
+  const fallback = resolve(DIST_DIR, 'index.html');
+  const filePath =
+    existsSync(candidate) && statSync(candidate).isFile() ? candidate : fallback;
+
+  if (!existsSync(filePath)) {
+    response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end('client build not found; run npm run build');
+    return;
+  }
+
+  sendFile(request, response, filePath);
+}
+
 const server = createServer((request, response) => {
   if (request.url === '/healthz') {
     response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
     response.end('ok');
     return;
   }
-  response.writeHead(426, { 'content-type': 'text/plain; charset=utf-8' });
-  response.end('expected a websocket upgrade at /signal');
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    response.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end('method not allowed');
+    return;
+  }
+  serveClient(request, response);
 });
 
 const wss = new WebSocketServer({
@@ -160,5 +231,5 @@ const sweeper = setInterval(() => {
 wss.on('close', () => clearInterval(sweeper));
 
 server.listen(PORT, () => {
-  console.log(`pol signal listening on :${PORT} (ws path /signal, health /healthz)`);
+  console.log(`pol listening on :${PORT} (client from ${DIST_DIR}, ws /signal, health /healthz)`);
 });
