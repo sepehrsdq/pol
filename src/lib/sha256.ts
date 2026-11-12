@@ -24,6 +24,10 @@ export class Sha256 {
   ]);
 
   private readonly block = new Uint8Array(64);
+  private readonly blockView = new DataView(this.block.buffer);
+  // Reused per block: allocating 256 bytes per 64-byte block dominates
+  // hashing cost on multi-gigabyte files.
+  private readonly w = new Uint32Array(64);
   private blockLength = 0;
   private bytesHashed = 0;
   private finished = false;
@@ -31,17 +35,28 @@ export class Sha256 {
   update(data: Uint8Array): this {
     if (this.finished) throw new Error('sha256: update() after digest()');
     this.bytesHashed += data.length;
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 
     let offset = 0;
-    while (offset < data.length) {
-      const take = Math.min(64 - this.blockLength, data.length - offset);
-      this.block.set(data.subarray(offset, offset + take), this.blockLength);
+    if (this.blockLength > 0) {
+      const take = Math.min(64 - this.blockLength, data.length);
+      this.block.set(data.subarray(0, take), this.blockLength);
       this.blockLength += take;
-      offset += take;
+      offset = take;
       if (this.blockLength === 64) {
-        this.compress(this.block, 0);
+        this.compress(this.blockView, 0);
         this.blockLength = 0;
       }
+    }
+
+    while (offset + 64 <= data.length) {
+      this.compress(view, offset);
+      offset += 64;
+    }
+
+    if (offset < data.length) {
+      this.block.set(data.subarray(offset), 0);
+      this.blockLength = data.length - offset;
     }
     return this;
   }
@@ -63,7 +78,7 @@ export class Sha256 {
     view.setUint32(paddedLength - 4, bitLengthLow);
 
     for (let offset = 0; offset < paddedLength; offset += 64) {
-      this.compress(padding, offset);
+      this.compress(view, offset);
     }
 
     const out = new Uint8Array(32);
@@ -76,10 +91,9 @@ export class Sha256 {
     return Array.from(this.digest(), (byte) => byte.toString(16).padStart(2, '0')).join('');
   }
 
-  private compress(data: Uint8Array, offset: number): void {
-    const w = new Uint32Array(64);
-    const view = new DataView(data.buffer, data.byteOffset + offset, 64);
-    for (let i = 0; i < 16; i += 1) w[i] = view.getUint32(i * 4);
+  private compress(view: DataView, offset: number): void {
+    const w = this.w;
+    for (let i = 0; i < 16; i += 1) w[i] = view.getUint32(offset + i * 4);
 
     for (let i = 16; i < 64; i += 1) {
       const x = w[i - 15] as number;

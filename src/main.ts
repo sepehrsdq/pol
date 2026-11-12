@@ -1,7 +1,6 @@
 import './styles.css';
 import { formatBytes, formatPercent, formatSpeed, shortenName } from './lib/format';
 import { setupReveal } from './lib/reveal';
-import { hashFile } from './lib/sha256';
 import { trace } from './lib/trace';
 import { formatCode, makeCode, parseCode } from './lib/words';
 import { loadIceServers } from './net/ice';
@@ -63,6 +62,7 @@ let lastAttempt: { role: TransferRole; room: string; file: File | null } | null 
 let sampleTime = 0;
 let sampleBytes = 0;
 let speed = 0;
+let lastPaint = 0;
 
 let connectAttempt = 0;
 
@@ -152,6 +152,7 @@ function resetProgress(): void {
   sampleTime = 0;
   sampleBytes = 0;
   speed = 0;
+  lastPaint = 0;
   setBar(0);
   progressSize.textContent = '';
   progressSpeed.textContent = '';
@@ -185,6 +186,11 @@ function trackProgress(done: number, total: number): void {
     sampleTime = now;
     sampleBytes = done;
   }
+
+  // Chunks arrive many times per frame; repaint at most ~10 times a second.
+  const complete = total > 0 && done >= total;
+  if (!complete && now - lastPaint < 90) return;
+  lastPaint = now;
 
   const ratio = total > 0 ? done / total : 0;
   setBar(ratio);
@@ -306,20 +312,11 @@ async function sendSelected(file: File): Promise<void> {
   progressCard.hidden = false;
   progressName.textContent = shortenName(file.name);
   progressSpeed.textContent = '';
-  setStatus('در حال بررسی سلامت فایل…', true);
-  resetProgress();
-
-  let hash: string | null = null;
-  try {
-    hash = await hashFile(file);
-  } catch {
-    hash = null;
-  }
-
   setStatus('در حال فرستادن…', true);
-  bridge.classList.add('is-active');
   resetProgress();
-  await transfer.sendFile(file, hash);
+  bridge.classList.add('is-active');
+
+  await transfer.sendFile(file);
 }
 
 async function connect(role: TransferRole, room: string, file: File | null): Promise<void> {

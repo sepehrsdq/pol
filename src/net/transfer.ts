@@ -2,6 +2,7 @@ import { Sha256 } from '../lib/sha256';
 import { trace } from '../lib/trace';
 
 const CHUNK_SIZE = 64 * 1024;
+const READ_SIZE = 1024 * 1024;
 const HIGH_WATER = 4 * 1024 * 1024;
 const LOW_WATER = 1 * 1024 * 1024;
 
@@ -262,7 +263,11 @@ export class Transfer {
     }
   }
 
-  async sendFile(file: File, hash: string | null): Promise<void> {
+  /**
+   * Stream the file and hash it in the same pass, so the sender never has to
+   * read a large file twice. The digest travels with the final "end" message.
+   */
+  async sendFile(file: File): Promise<void> {
     const channel = this.channel;
     if (!channel) {
       this.events.onError('send-failed');
@@ -275,20 +280,30 @@ export class Transfer {
       name: file.name,
       size: file.size,
       mime: file.type || 'application/octet-stream',
-      hash,
+      hash: null,
     };
     channel.send(JSON.stringify({ kind: 'meta', ...meta }));
 
+    const hash = new Sha256();
     let offset = 0;
     try {
       while (offset < file.size) {
-        if (channel.bufferedAmount > HIGH_WATER) await waitDrain(channel);
-        const buffer = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
-        channel.send(buffer);
-        offset += buffer.byteLength;
-        this.events.onProgress(offset, file.size);
+        // Read a megabyte at a time: a blob read per 64 KB chunk costs more
+        // than the hashing itself. Chunks still go out at 64 KB.
+        const buffer = await file.slice(offset, offset + READ_SIZE).arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        hash.update(bytes);
+        const chunkStart = offset;
+        offset += bytes.byteLength;
+
+        for (let inner = 0; inner < bytes.byteLength; inner += CHUNK_SIZE) {
+          if (channel.bufferedAmount > HIGH_WATER) await waitDrain(channel);
+          const end = Math.min(inner + CHUNK_SIZE, bytes.byteLength);
+          channel.send(bytes.subarray(inner, end));
+          this.events.onProgress(chunkStart + end, file.size);
+        }
       }
-      channel.send(JSON.stringify({ kind: 'end' }));
+      channel.send(JSON.stringify({ kind: 'end', hash: hash.digestHex() }));
     } catch {
       this.events.onError('send-failed');
     }
@@ -321,12 +336,14 @@ export class Transfer {
     if (message.kind === 'end') {
       this.finished = true;
       const received = this.receiveHash ? this.receiveHash.digestHex() : null;
-      const checked = received !== null && this.expectedHash !== null;
+      // New senders declare the digest here; old ones put it in "meta".
+      const declared = typeof message.hash === 'string' ? message.hash : this.expectedHash;
+      const checked = received !== null && declared !== null;
       const sizeOk = this.receivedBytes === this.expectedSize;
-      const ok = checked && received === this.expectedHash && sizeOk;
+      const ok = checked && received === declared && sizeOk;
       const blob = new Blob(this.received, { type: this.mime });
       this.channel?.send(JSON.stringify({ kind: 'done', ok, hash: received }));
-      this.events.onVerified({ checked, ok, expected: this.expectedHash, received, blob });
+      this.events.onVerified({ checked, ok, expected: declared, received, blob });
       return;
     }
 

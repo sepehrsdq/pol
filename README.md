@@ -14,7 +14,7 @@ Send a file straight from one browser to another. Pick a file, get four words, h
 
 - **Four-word code** — four Persian words from a 64-word list, easy to read over the phone and type on a mobile keyboard.
 - **Direct transfer** — file bytes only use the data channel. The signal server introduces the two browsers and relays SDP/ICE; it never sees the file.
-- **Integrity check** — SHA-256 is computed while streaming, so a 2 GB file does not need 2 GB of RAM. The receiver hashes what it gets and compares.
+- **Integrity check** — both sides hash while the bytes move, and the digest rides along with the last control message. There is no separate pass over the file, so a large file starts sending right away and never needs its size in RAM twice.
 - **Persian and RTL** — right-to-left interface, light and dark themes, Vazirmatn bundled locally. No external CDN.
 
 ## Run it
@@ -88,7 +88,7 @@ npm run dev          # ترمینال دوم
 - STUN داخل خود برنامه است، پس بیشتر شبکه‌های خانگی مستقیم وصل می‌شوند. بدون رلهٔ TURN، دو شبکهٔ جدا فعلاً پشتیبانی نمی‌شوند.
 - هر نشست یک فایل؛ پوشه و ادامهٔ انتقال بعد از قطعی هنوز نیست.
 - فایل در حافظهٔ تب جمع می‌شود؛ برای فایل چند گیگابایتی مناسب نیست.
-- سلامت فایل با SHA-256 بررسی می‌شود و در پایان، نتیجه روی هر دو طرف دیده می‌شود.
+- سلامت فایل با SHA-256 بررسی می‌شود و در پایان، نتیجه روی هر دو طرف دیده می‌شود. هش هم‌زمان با ارسال حساب می‌شود، پس فایل بزرگ قبل از شروع یک دور اضافه خوانده نمی‌شود.
 
 ## License
 
