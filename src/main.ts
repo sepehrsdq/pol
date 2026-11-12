@@ -3,6 +3,7 @@ import { formatBytes, formatPercent, formatSpeed, shortenName } from './lib/form
 import { hashFile } from './lib/sha256';
 import { trace } from './lib/trace';
 import { formatCode, makeCode, parseCode } from './lib/words';
+import { loadIceServers } from './net/ice';
 import { defaultSignalUrl, SignalClient, type ServerMessage } from './net/signal';
 import { Transfer, type FileMeta, type SignalPayload, type TransferRole } from './net/transfer';
 
@@ -60,17 +61,8 @@ let busy = false;
 let sampleTime = 0;
 let sampleBytes = 0;
 let speed = 0;
-
-function readIceServers(): RTCIceServer[] {
-  const raw = import.meta.env.VITE_ICE;
-  if (typeof raw !== 'string' || raw.trim() === '') return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as RTCIceServer[]) : [];
-  } catch {
-    return [];
-  }
-}
+let iceHasTurn = false;
+let connectAttempt = 0;
 
 function setMode(next: 'send' | 'receive'): void {
   if (mode === next) return;
@@ -182,7 +174,9 @@ function trackProgress(done: number, total: number): void {
 function describeError(code: string): string {
   switch (code) {
     case 'connection-failed':
-      return 'اتصال مستقیم برقرار نشد. احتمالاً دو دستگاه در دو شبکهٔ جدا هستند و مسیر مستقیم بسته است. با یک شبکهٔ مشترک امتحان کن.';
+      return iceHasTurn
+        ? 'اتصال برقرار نشد؛ مسیر رله هم جواب نداد. یک بار دیگر تلاش کن یا شبکهٔ دیگری امتحان کن.'
+        : 'این شبکه اجازهٔ اتصال مستقیم نداد. با شبکهٔ دیگر (مثلاً دادهٔ موبایل) امتحان کن.';
     case 'channel-closed':
       return 'طرف مقابل قطع شد. صفحه را نبند تا انتقال تمام شود.';
     case 'send-failed':
@@ -192,8 +186,8 @@ function describeError(code: string): string {
   }
 }
 
-function buildTransfer(role: TransferRole): Transfer {
-  return new Transfer(role, readIceServers(), (payload: SignalPayload) => signal?.relay(payload), {
+function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer {
+  return new Transfer(role, iceServers, (payload: SignalPayload) => signal?.relay(payload), {
     onState: (state) => {
       if (state === 'open' && role === 'sender' && selectedFile) {
         void sendSelected(selectedFile);
@@ -291,12 +285,19 @@ async function sendSelected(file: File): Promise<void> {
   await transfer.sendFile(file, hash);
 }
 
-function connect(role: TransferRole, room: string, file: File | null): void {
+async function connect(role: TransferRole, room: string, file: File | null): Promise<void> {
+  const attempt = ++connectAttempt;
   teardown();
   selectedFile = file;
   busy = true;
+  iceHasTurn = false;
+  setStatus('در حال آماده‌کردن مسیر اتصال…', true);
 
-  transfer = buildTransfer(role);
+  const ice = await loadIceServers(defaultSignalUrl());
+  if (attempt !== connectAttempt || !busy) return;
+  iceHasTurn = ice.hasTurn;
+
+  transfer = buildTransfer(role, ice.servers);
   signal = new SignalClient(defaultSignalUrl(), room, role, {
     onMessage: (message: ServerMessage) => handleServerMessage(message, role),
     onClose: () => {
@@ -305,7 +306,7 @@ function connect(role: TransferRole, room: string, file: File | null): void {
       setStatus(null);
       showAlert(
         'ارتباط با سرور سیگنالینگ برقرار نشد. اگر نسخهٔ دمو تازه بیدار می‌شود، چند ثانیه صبر کن و دوباره بزن.',
-        () => connect(role, room, file),
+        () => void connect(role, room, file),
       );
     },
   });
@@ -382,7 +383,7 @@ function startSending(file: File): void {
   hideResult();
   hideAlert();
 
-  connect('sender', formatCode(words), file);
+  void connect('sender', formatCode(words), file);
 }
 
 function startReceiving(input: string): void {
@@ -394,7 +395,7 @@ function startReceiving(input: string): void {
   }
   activeWords = words;
   reset();
-  connect('receiver', formatCode(words), null);
+  void connect('receiver', formatCode(words), null);
 }
 
 async function copyCode(): Promise<void> {

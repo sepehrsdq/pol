@@ -11,12 +11,13 @@
 //   s -> c  { t: "error", message }
 //   both    { t: "s", data }      opaque relay for SDP/ICE
 //
-// HTTP: GET /healthz for platform checks, everything else from dist/.
+// HTTP: GET /healthz for platform checks, GET /ice for STUN/TURN, the rest from dist/.
 
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, resolve, sep } from 'node:path';
 import { WebSocketServer } from 'ws';
+import { buildIceServers, hasIncompleteTurn } from './ice.mjs';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const HEARTBEAT_MS = 30_000;
@@ -139,6 +140,24 @@ const server = createServer((request, response) => {
     response.end('ok');
     return;
   }
+  if (request.url === '/ice') {
+    if (request.method === 'OPTIONS') {
+      response.writeHead(204, {
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'GET, OPTIONS',
+        'access-control-max-age': '86400',
+      });
+      response.end();
+      return;
+    }
+    response.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'access-control-allow-origin': '*',
+    });
+    response.end(JSON.stringify(buildIceServers()));
+    return;
+  }
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     response.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' });
     response.end('method not allowed');
@@ -230,6 +249,16 @@ const sweeper = setInterval(() => {
 
 wss.on('close', () => clearInterval(sweeper));
 
+const bootIce = buildIceServers();
+const turnConfigured = bootIce.iceServers.some((entry) =>
+  (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).some((url) => /^turns?:/i.test(url)),
+);
+if (hasIncompleteTurn()) {
+  console.warn('TURN_URLS is set but TURN_SECRET or TURN_USERNAME/TURN_PASSWORD is missing; serving STUN only.');
+}
+
 server.listen(PORT, () => {
-  console.log(`pol listening on :${PORT} (client from ${DIST_DIR}, ws /signal, health /healthz)`);
+  console.log(
+    `pol listening on :${PORT} (client from ${DIST_DIR}, ws /signal, health /healthz, ice /ice turn:${turnConfigured ? 'on' : 'off'})`,
+  );
 });

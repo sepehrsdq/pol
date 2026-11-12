@@ -33,14 +33,20 @@ For a deployment build, point it at your signaling server:
 VITE_SIGNAL_URL=wss://example.com/signal npm run build
 ```
 
-Add STUN/TURN when the two devices are not on the same network:
+The client asks the signaling server for ICE servers at `GET /ice`, so TURN can
+be added without rebuilding the client. STUN is built in.
 
 ```bash
-VITE_ICE='[{"urls":"stun:stun.example.com:3478"}]' npm run build
+# server env
+TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:443
+TURN_SECRET=...            # coturn REST secret: short-lived credentials per client
+# or static credentials:
+TURN_USERNAME=...
+TURN_PASSWORD=...
 ```
 
 ```bash
-npm test        # 26 tests: word codes, file sizes, SHA-256 vectors
+npm test        # 41 tests: word codes, file sizes, SHA-256, ICE config
 npm run build   # typecheck + production build
 ```
 
@@ -57,7 +63,7 @@ The sender creates a data channel and offers; the receiver answers. Files are sl
 
 Known limits:
 
-- Without STUN/TURN, both devices must share a network or sit behind a simple NAT.
+- STUN is built in, so most home networks connect directly. Without a TURN relay, symmetric NAT and restrictive firewalls can still block the path.
 - One file per session; folders and resume-after-disconnect are not built yet.
 - The file is assembled in the tab's memory, so multi-gigabyte transfers are not practical yet.
 - If the signal server is malicious it could theoretically sit in the middle. The code does not protect against that yet.
@@ -75,7 +81,7 @@ npm run dev          # ترمینال دوم
 ```
 
 - کد چهارکلمه‌ای فقط شناسهٔ اتاق است، نه رمز. رمزنگاری از خود WebRTC می‌آید.
-- بدون STUN/TURN فقط شبکهٔ محلی یا NAT ساده جواب می‌دهد.
+- STUN داخل خود برنامه است، پس بیشتر شبکه‌های خانگی مستقیم وصل می‌شوند. بدون رلهٔ TURN، شبکه‌های symmetric NAT و فایروال سخت ممکن است مسیر مستقیم را ببندند.
 - هر نشست یک فایل؛ پوشه و ادامهٔ انتقال بعد از قطعی هنوز نیست.
 - فایل در حافظهٔ تب جمع می‌شود؛ برای فایل چند گیگابایتی مناسب نیست.
 - سلامت فایل با SHA-256 بررسی می‌شود و در پایان، نتیجه روی هر دو طرف دیده می‌شود.
