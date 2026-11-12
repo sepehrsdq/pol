@@ -28,13 +28,16 @@ export function defaultSignalUrl(): string {
 export class SignalClient {
   private readonly socket: WebSocket;
   private closedByUs = false;
+  private readonly queue: unknown[] = [];
 
   constructor(url: string, room: string, role: Role, handlers: SignalHandlers) {
     this.socket = new WebSocket(url);
 
     this.socket.addEventListener('open', () => {
       trace('signal open', room, role);
-      this.send({ t: 'join', room, role });
+      this.socket.send(JSON.stringify({ t: 'join', room, role }));
+      for (const payload of this.queue) this.socket.send(JSON.stringify(payload));
+      this.queue.length = 0;
     });
 
     this.socket.addEventListener('error', () => {
@@ -60,8 +63,12 @@ export class SignalClient {
   }
 
   send(payload: unknown): void {
-    if (this.socket.readyState !== WebSocket.OPEN) return;
-    this.socket.send(JSON.stringify(payload));
+    if (this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(payload));
+      return;
+    }
+    // Hold early SDP/ICE until the socket is up instead of dropping it.
+    if (this.socket.readyState === WebSocket.CONNECTING) this.queue.push(payload);
   }
 
   relay(data: unknown): void {

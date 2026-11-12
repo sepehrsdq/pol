@@ -5,6 +5,13 @@ const CHUNK_SIZE = 64 * 1024;
 const HIGH_WATER = 4 * 1024 * 1024;
 const LOW_WATER = 1 * 1024 * 1024;
 
+/** Give the first ICE attempt this long before restarting once. */
+const RESTART_AFTER_MS = 11_000;
+/** Hard stop: no data channel by then means the network refused. */
+const CONNECT_TIMEOUT_MS = 30_000;
+/** The second attempt gets a shorter window than the first. */
+const RESTART_TIMEOUT_MS = 16_000;
+
 export type TransferRole = 'sender' | 'receiver';
 
 export interface FileMeta {
@@ -29,13 +36,19 @@ export interface VerifyResult {
 
 export type TransferError = 'connection-failed' | 'channel-closed' | 'send-failed';
 
+/** What the browser managed to gather, so a failure can be explained. */
+export interface TransferDiagnostics {
+  candidates: string[];
+  iceErrors: string[];
+}
+
 export interface TransferEvents {
   onState: (state: 'connecting' | 'open' | 'closed') => void;
   onMeta: (meta: FileMeta) => void;
   onProgress: (done: number, total: number) => void;
   onVerified: (result: VerifyResult) => void;
   onAck: (ok: boolean) => void;
-  onError: (error: TransferError) => void;
+  onError: (error: TransferError, detail?: TransferDiagnostics) => void;
 }
 
 function waitDrain(channel: RTCDataChannel): Promise<void> {
@@ -84,9 +97,17 @@ function waitOpen(channel: RTCDataChannel): Promise<RTCDataChannel> {
 export class Transfer {
   private readonly pc: RTCPeerConnection;
   private readonly events: TransferEvents;
+  private readonly role: TransferRole;
   private channel: RTCDataChannel | null = null;
   private pendingIce: RTCIceCandidateInit[] = [];
   private finished = false;
+
+  private opened = false;
+  private restarted = false;
+  private giveUpTimer = 0;
+  private restartTimer = 0;
+  private readonly candidateTypes = new Set<string>();
+  private readonly iceErrors: string[] = [];
 
   private expectedHash: string | null = null;
   private expectedSize = 0;
@@ -102,18 +123,28 @@ export class Transfer {
     events: TransferEvents,
   ) {
     this.events = events;
+    this.role = role;
     this.pc = new RTCPeerConnection({ iceServers });
 
     this.pc.addEventListener('icecandidate', (event) => {
-      if (event.candidate) {
-        sendSignal({ kind: 'ice', candidate: event.candidate.toJSON() });
-      }
+      if (!event.candidate) return;
+      const type = event.candidate.type;
+      if (typeof type === 'string') this.candidateTypes.add(type);
+      sendSignal({ kind: 'ice', candidate: event.candidate.toJSON() });
+    });
+
+    // STUN/TURN failures land here (401 from a TURN server, 701 for a timeout).
+    this.pc.addEventListener('icecandidateerror', (event) => {
+      const detail = event as RTCPeerConnectionIceErrorEvent;
+      const url = typeof detail.url === 'string' ? detail.url : '';
+      this.iceErrors.push(`${detail.errorCode}${url ? ` ${url}` : ''}`);
+      trace('ice error', detail.errorCode, url);
     });
 
     this.pc.addEventListener('connectionstatechange', () => {
       const state = this.pc.connectionState;
       trace('pc', state);
-      if (state === 'failed') this.events.onError('connection-failed');
+      if (state === 'failed' && !this.opened) this.failOrRestart();
     });
 
     if (role === 'sender') {
@@ -125,6 +156,53 @@ export class Transfer {
     }
   }
 
+  private diagnostics(): TransferDiagnostics {
+    return { candidates: [...this.candidateTypes], iceErrors: [...this.iceErrors] };
+  }
+
+  /** Only start counting once an offer or answer is actually on the wire. */
+  private startGiveUpTimer(ms: number): void {
+    window.clearTimeout(this.giveUpTimer);
+    this.giveUpTimer = window.setTimeout(() => {
+      if (this.opened) return;
+      this.events.onError('connection-failed', this.diagnostics());
+    }, ms);
+  }
+
+  /** The sender owns renegotiation, so only it can restart ICE. */
+  private failOrRestart(): void {
+    if (this.role === 'sender' && !this.restarted) {
+      void this.restartIce();
+      return;
+    }
+    this.events.onError('connection-failed', this.diagnostics());
+  }
+
+  private scheduleRestart(): void {
+    if (this.role !== 'sender' || this.restarted) return;
+    this.restartTimer = window.setTimeout(() => void this.restartIce(), RESTART_AFTER_MS);
+  }
+
+  private async restartIce(): Promise<void> {
+    if (this.opened) return;
+    if (this.restarted) {
+      this.events.onError('connection-failed', this.diagnostics());
+      return;
+    }
+    this.restarted = true;
+    window.clearTimeout(this.restartTimer);
+    trace('ice restart');
+
+    try {
+      const offer = await this.pc.createOffer({ iceRestart: true });
+      await this.pc.setLocalDescription(offer);
+      this.sendSignal({ kind: 'offer', sdp: offer.sdp ?? '' });
+      this.startGiveUpTimer(RESTART_TIMEOUT_MS);
+    } catch {
+      this.events.onError('connection-failed', this.diagnostics());
+    }
+  }
+
   private attach(channel: RTCDataChannel): void {
     this.channel = channel;
     channel.binaryType = 'arraybuffer';
@@ -133,6 +211,9 @@ export class Transfer {
 
     channel.addEventListener('open', () => {
       channel.bufferedAmountLowThreshold = LOW_WATER;
+      this.opened = true;
+      window.clearTimeout(this.giveUpTimer);
+      window.clearTimeout(this.restartTimer);
       trace('dc open');
       this.events.onState('open');
     });
@@ -154,6 +235,8 @@ export class Transfer {
     await this.pc.setLocalDescription(offer);
     trace('offer ready', offer.sdp?.length ?? 0);
     this.sendSignal({ kind: 'offer', sdp: offer.sdp ?? '' });
+    this.startGiveUpTimer(CONNECT_TIMEOUT_MS);
+    this.scheduleRestart();
   }
 
   async handleSignal(payload: SignalPayload): Promise<void> {
@@ -175,6 +258,7 @@ export class Transfer {
       const answer = await this.pc.createAnswer();
       await this.pc.setLocalDescription(answer);
       this.sendSignal({ kind: 'answer', sdp: answer.sdp ?? '' });
+      this.startGiveUpTimer(CONNECT_TIMEOUT_MS);
     }
   }
 
@@ -262,6 +346,8 @@ export class Transfer {
 
   close(): void {
     this.finished = true;
+    window.clearTimeout(this.giveUpTimer);
+    window.clearTimeout(this.restartTimer);
     this.channel?.close();
     this.pc.close();
   }

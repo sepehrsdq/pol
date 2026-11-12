@@ -940,6 +940,12 @@ input[type='text']:hover {
   margin-top: 10px;
 }
 
+.alert-meta {
+  margin-top: 6px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
 /* Progress */
 
 .progress-card {

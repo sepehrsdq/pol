@@ -6,7 +6,7 @@ import { trace } from './lib/trace';
 import { formatCode, makeCode, parseCode } from './lib/words';
 import { loadIceServers } from './net/ice';
 import { defaultSignalUrl, SignalClient, type ServerMessage } from './net/signal';
-import { Transfer, type FileMeta, type SignalPayload, type TransferRole } from './net/transfer';
+import { Transfer, type FileMeta, type SignalPayload, type TransferDiagnostics, type TransferRole } from './net/transfer';
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -59,10 +59,11 @@ let activeWords: string[] | null = null;
 let receivedName = 'file';
 let downloadUrl: string | null = null;
 let busy = false;
+let lastAttempt: { role: TransferRole; room: string; file: File | null } | null = null;
 let sampleTime = 0;
 let sampleBytes = 0;
 let speed = 0;
-let iceHasTurn = false;
+
 let connectAttempt = 0;
 
 function setMode(next: 'send' | 'receive'): void {
@@ -95,9 +96,28 @@ function hideAlert(): void {
   alertBox.textContent = '';
 }
 
-function showAlert(message: string, retry?: () => void): void {
+const ROUTE_LABELS: Record<string, string> = {
+  host: 'محلی',
+  srflx: 'عمومی',
+  relay: 'رله',
+};
+
+function describeRoutes(detail: TransferDiagnostics): string {
+  const labels = detail.candidates.map((type) => ROUTE_LABELS[type] ?? type);
+  return `مسیرهای پیدا شده: ${labels.length > 0 ? labels.join('، ') : 'هیچ مسیری'}`;
+}
+
+function showAlert(message: string, retry?: () => void, detail?: TransferDiagnostics): void {
   alertBox.textContent = message;
   alertBox.hidden = false;
+
+  if (detail) {
+    const meta = document.createElement('p');
+    meta.className = 'alert-meta';
+    meta.textContent = describeRoutes(detail);
+    alertBox.append(meta);
+  }
+
   if (!retry) return;
 
   const button = document.createElement('button');
@@ -172,12 +192,18 @@ function trackProgress(done: number, total: number): void {
   progressSpeed.textContent = speed > 0 ? formatSpeed(speed) : '';
 }
 
-function describeError(code: string): string {
+function describeError(code: string, detail?: TransferDiagnostics): string {
   switch (code) {
-    case 'connection-failed':
-      return iceHasTurn
-        ? 'اتصال برقرار نشد؛ مسیر رله هم جواب نداد. یک بار دیگر تلاش کن یا شبکهٔ دیگری امتحان کن.'
-        : 'این شبکه اجازهٔ اتصال مستقیم نداد. با شبکهٔ دیگر (مثلاً دادهٔ موبایل) امتحان کن.';
+    case 'connection-failed': {
+      const routes = detail?.candidates ?? [];
+      if (routes.length === 0) {
+        return 'مرورگر هیچ مسیری برای اتصال پیدا نکرد. اگر فایروال یا آنتی‌ویروس جلوی مرورگر را گرفته، اجازه‌اش بده و دوباره تلاش کن.';
+      }
+      if (!routes.includes('srflx') && !routes.includes('relay')) {
+        return 'دو دستگاه روی یک شبکه دیده شدند، ولی به هم نرسیدند. فایروال ویندوز یا جداسازی کلاینت در روتر معمولاً همین کار را می‌کند. اجازهٔ شبکه به مرورگر را چک کن یا با هات‌اسپات موبایل امتحان کن.';
+      }
+      return 'دو دستگاه به هم نرسیدند. یک بار دیگر بزن؛ اگر نشد، هات‌اسپات موبایل را امتحان کن.';
+    }
     case 'channel-closed':
       return 'طرف مقابل قطع شد. صفحه را نبند تا انتقال تمام شود.';
     case 'send-failed':
@@ -252,11 +278,21 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
         : 'فایل رفت، ولی طرف مقابل گفت هش نمی‌خواند. یک بار دیگر بفرست.';
       resultHash.textContent = '';
     },
-    onError: (code) => {
+    onError: (code, detail) => {
       busy = false;
       bridge.classList.remove('is-active');
       setStatus(null);
-      showAlert(describeError(code));
+
+      const attempt = lastAttempt;
+      const retry =
+        code === 'connection-failed' && attempt
+          ? () => {
+              // Let the old socket close on the server before rejoining.
+              window.setTimeout(() => void connect(attempt.role, attempt.room, attempt.file), 600);
+            }
+          : undefined;
+
+      showAlert(describeError(code, detail), retry, detail);
     },
   });
 }
@@ -291,12 +327,11 @@ async function connect(role: TransferRole, room: string, file: File | null): Pro
   teardown();
   selectedFile = file;
   busy = true;
-  iceHasTurn = false;
+  lastAttempt = { role, room, file };
   setStatus('در حال آماده‌کردن مسیر اتصال…', true);
 
   const ice = await loadIceServers(defaultSignalUrl());
   if (attempt !== connectAttempt || !busy) return;
-  iceHasTurn = ice.hasTurn;
 
   transfer = buildTransfer(role, ice.servers);
   signal = new SignalClient(defaultSignalUrl(), room, role, {
