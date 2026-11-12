@@ -1,0 +1,24 @@
+{
+  "name": "pol",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser-to-browser file transfer. Nothing is uploaded.",
+  "scripts": {
+    "dev": "vite",
+    "dev:signal": "node server/signal.mjs",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  }
+}

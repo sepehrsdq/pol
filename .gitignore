@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.vite/
+
+# local secrets — signal url, ICE servers, tokens
+.env
+.env.*
+!.env.example
+*.local
+
+.DS_Store
+Thumbs.db
+*.log

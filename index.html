@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>پل — انتقال مستقیم فایل</title>
+    <meta
+      name="description"
+      content="فایل را مستقیم بین دو مرورگر جابه‌جا کن. هیچ فایلی آپلود نمی‌شود و از سرور عبور نمی‌کند."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Crect x='5' y='10' width='8' height='12' rx='2' fill='white'/%3E%3Crect x='19' y='10' width='8' height='12' rx='2' fill='white'/%3E%3Crect x='13' y='15' width='6' height='2' rx='1' fill='white'/%3E%3C/svg%3E"
+    />
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('pol-theme');
+          var dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+          document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        } catch (error) {
+          document.documentElement.dataset.theme = 'light';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <a class="skip" href="#main">رفتن به محتوا</a>
+
+    <header class="top wrap">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <rect x="3" y="8" width="9" height="16" rx="3" />
+          <rect x="20" y="8" width="9" height="16" rx="3" />
+          <path d="M12 16h8" />
+        </svg>
+        <div class="brand-text">
+          <strong>پل</strong>
+          <span>انتقال مستقیم فایل</span>
+        </div>
+      </div>
+
+      <button class="icon-btn" id="theme-toggle" type="button" aria-label="تغییر روشنایی">
+        <svg class="icon sun" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+        </svg>
+        <svg class="icon moon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a7 7 0 1 0 10.5 10.5Z" />
+        </svg>
+      </button>
+    </header>
+
+    <main id="main" class="wrap">
+      <section class="hero">
+        <h1>فایل را بفرست، از این مرورگر به آن مرورگر.</h1>
+        <p class="lede">
+          یک کد چهارکلمه‌ای می‌گیری و به طرف مقابل می‌دهی. فایل مستقیم بین دو دستگاه رد و بدل
+          می‌شود؛ نه آپلود، نه اکانت، نه سروری که فایل را نگه دارد.
+        </p>
+
+        <div class="bridge" id="bridge" aria-hidden="true">
+          <svg viewBox="0 0 720 160">
+            <g class="device">
+              <rect x="520" y="42" width="150" height="96" rx="14" />
+              <rect class="screen" x="536" y="58" width="118" height="52" rx="6" />
+              <rect class="line" x="536" y="120" width="54" height="6" rx="3" />
+            </g>
+            <g class="device">
+              <rect x="50" y="42" width="150" height="96" rx="14" />
+              <rect class="screen" x="66" y="58" width="118" height="52" rx="6" />
+              <rect class="line" x="66" y="120" width="54" height="6" rx="3" />
+            </g>
+            <path class="beam" d="M500 90H220" />
+            <circle class="packet" cx="500" cy="90" r="5" />
+          </svg>
+          <div class="bridge-labels">
+            <span>این دستگاه</span>
+            <span class="bridge-note">مستقیم، بدون سرور</span>
+            <span>دستگاه مقابل</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" aria-label="انتقال فایل">
+        <div class="tabs" role="tablist" aria-label="حالت">
+          <button
+            type="button"
+            class="tab is-active"
+            id="tab-send"
+            role="tab"
+            aria-selected="true"
+            aria-controls="send-view"
+          >
+            فرستادن
+          </button>
+          <button
+            type="button"
+            class="tab"
+            id="tab-receive"
+            role="tab"
+            aria-selected="false"
+            aria-controls="receive-view"
+          >
+            گرفتن
+          </button>
+        </div>
+
+        <div id="send-view" role="tabpanel" aria-labelledby="tab-send">
+          <label class="drop" id="drop" for="file">
+            <svg class="icon drop-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 16V4m0 0L7 9m5-5 5 5" />
+              <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+            </svg>
+            <span class="drop-title">فایل را اینجا رها کن</span>
+            <span class="drop-hint">یا کلیک کن و از دستگاه انتخاب کن</span>
+          </label>
+          <input type="file" id="file" class="visually-hidden" />
+
+          <div class="code-card" id="code-card" hidden>
+            <span class="eyebrow">کد اتصال</span>
+            <p class="hint" id="picked"></p>
+            <div class="code" id="code" aria-live="polite"></div>
+            <div class="row">
+              <button type="button" class="btn btn-ghost" id="copy-code">کپی کد</button>
+              <button type="button" class="btn btn-ghost" id="cancel">لغو</button>
+            </div>
+            <p class="hint">این چهار کلمه را برای طرف مقابل بفرست. تا وصل نشده، صفحه را نبند.</p>
+          </div>
+        </div>
+
+        <div id="receive-view" role="tabpanel" aria-labelledby="tab-receive" hidden>
+          <form id="join-form" class="join" novalidate>
+            <label for="code-input">کد چهارکلمه‌ای</label>
+            <div class="join-row">
+              <input
+                type="text"
+                id="code-input"
+                name="code"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="آب باد ماه گل"
+                aria-describedby="join-hint"
+              />
+              <button class="btn btn-primary" type="submit">وصل شو</button>
+            </div>
+            <p class="hint" id="join-hint">کد را از فرستنده بگیر؛ چهار کلمه، با فاصله.</p>
+          </form>
+        </div>
+
+        <p class="status" id="status" aria-live="polite" hidden></p>
+        <p class="alert" id="alert" role="alert" hidden></p>
+
+        <div class="progress-card" id="progress-card" hidden>
+          <div class="progress-head">
+            <span class="progress-name" id="progress-name" dir="auto"></span>
+            <span class="progress-pct" id="progress-pct">۰٪</span>
+          </div>
+          <div
+            class="bar"
+            id="bar"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+          >
+            <div class="bar-fill" id="bar-fill"></div>
+          </div>
+          <div class="progress-meta">
+            <span id="progress-size"></span>
+            <span id="progress-speed"></span>
+          </div>
+        </div>
+
+        <div class="result" id="result" hidden>
+          <p class="result-title" id="result-title"></p>
+          <p class="result-hash" id="result-hash" dir="ltr"></p>
+          <a class="btn btn-primary" id="download" download hidden>دانلود فایل</a>
+        </div>
+      </section>
+
+      <section class="steps" aria-label="چطور کار می‌کند">
+        <article class="step">
+          <span class="step-num">۱</span>
+          <h2>فایل را انتخاب کن</h2>
+          <p>هر فایلی، بدون محدودیت نوع. فایل روی دستگاه خودت می‌ماند.</p>
+        </article>
+        <article class="step">
+          <span class="step-num">۲</span>
+          <h2>کد را بده</h2>
+          <p>چهار کلمهٔ ساده. با تلفن یا پیام می‌فرستی، هر جا که راحت است.</p>
+        </article>
+        <article class="step">
+          <span class="step-num">۳</span>
+          <h2>طرف مقابل وصل می‌شود</h2>
+          <p>انتقال شروع می‌شود و در پایان، سلامت فایل با SHA-256 بررسی می‌شود.</p>
+        </article>
+      </section>
+    </main>
+
+    <footer class="foot wrap">
+      <p>پل فایل را از مرورگر تو به مرورگر او می‌برد. سرور فقط دو طرف را به هم معرفی می‌کند.</p>
+      <p class="foot-note">بدون اکانت · بدون آپلود · بدون تبلیغ</p>
+    </footer>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
