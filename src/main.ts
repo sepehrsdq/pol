@@ -1,5 +1,6 @@
 import './styles.css';
 import { formatBytes, formatPercent, formatSpeed, shortenName } from './lib/format';
+import { setupReveal } from './lib/reveal';
 import { hashFile } from './lib/sha256';
 import { trace } from './lib/trace';
 import { formatCode, makeCode, parseCode } from './lib/words';
@@ -434,6 +435,8 @@ function applyTheme(next: 'light' | 'dark'): void {
 
 tabs.send.addEventListener('click', () => setMode('send'));
 tabs.receive.addEventListener('click', () => setMode('receive'));
+
+setupReveal();
 
 themeToggle.addEventListener('click', () => {
   const current = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
