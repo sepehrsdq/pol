@@ -562,21 +562,43 @@ p {
   animation: net-pulse 3.4s ease-in-out infinite;
 }
 
-.net-case.is-soon .link {
-  stroke: var(--muted);
+.net-case.is-relay .link {
+  stroke: var(--accent);
   stroke-dasharray: 4 6;
+  animation: relay-dash 1.4s linear infinite;
 }
 
-.net-art .badge-no {
-  fill: var(--panel);
-  stroke: var(--muted);
+.net-art .badge-relay {
+  fill: var(--accent-soft, var(--panel));
+  stroke: var(--accent);
   stroke-width: 2;
+  transform-origin: 150px 98px;
 }
 
-.net-art .cross {
-  stroke: var(--muted);
-  stroke-width: 2.4;
-  stroke-linecap: round;
+.net-art .bolt {
+  fill: var(--accent);
+}
+
+.is-relay .badge-relay {
+  animation: relay-pulse 2.6s ease-in-out infinite;
+}
+
+@keyframes relay-dash {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+@keyframes relay-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.12);
+    opacity: 0.85;
+  }
 }
 
 .net-case figcaption {
@@ -611,10 +633,10 @@ p {
   background: var(--ok-soft);
 }
 
-.net-chip.is-soon {
+.net-chip.is-relay {
   color: var(--accent);
   background: var(--panel);
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--accent);
 }
 
 @keyframes net-pulse {
@@ -634,7 +656,12 @@ p {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .is-ok .badge-ok {
+  .is-ok .badge-ok,
+  .is-relay .badge-relay {
+    animation: none;
+  }
+
+  .net-case.is-relay .link {
     animation: none;
   }
 }

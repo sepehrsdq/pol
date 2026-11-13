@@ -97,10 +97,11 @@
 
       <section class="net-note" aria-labelledby="net-title" data-reveal>
         <div class="net-head">
-          <h2 id="net-title">فعلاً هر دو دستگاه باید روی یک شبکه باشند</h2>
+          <h2 id="net-title">یک شبکه مستقیم، شبکه‌های جدا با رله</h2>
           <p>
-            انتقال بین دو شبکهٔ جدا هنوز فعال نیست. اگر یکی روی وای‌فای خانه و دیگری روی دادهٔ
-            موبایل باشد، ممکن است وصل نشوند. رلهٔ TURN در نسخهٔ بعد اضافه می‌شود.
+            اگر هر دو دستگاه روی یک شبکه باشند، فایل مستقیم و بدون سقف حجم جابه‌جا می‌شود. بین دو
+            شبکهٔ جدا (مثلاً وای‌فای خانه و دیتای موبایل) ترافیک از رلهٔ TURN می‌گذرد و فعلاً تا
+            ۲۰۰ مگابایت پذیرفته می‌شود؛ فایل بزرگ‌تر در مسیر رله رد می‌شود.
           </p>
         </div>
 
@@ -121,11 +122,11 @@
             <figcaption>
               <span class="net-name">یک شبکه</span>
               <span class="net-chip is-ok">کار می‌کند</span>
-              <span class="net-desc">هر دو دستگاه روی یک وای‌فای</span>
+              <span class="net-desc">مستقیم و بدون سقف حجم</span>
             </figcaption>
           </figure>
 
-          <figure class="net-case is-soon">
+          <figure class="net-case is-relay">
             <svg class="net-art" viewBox="50 34 200 92" aria-hidden="true" focusable="false">
               <path class="wifi" d="M78 46a20 20 0 0 1 28 0" />
               <path class="wifi" d="M84 54a12 12 0 0 1 16 0" />
@@ -138,13 +139,13 @@
               <rect class="dev" x="176" y="76" width="64" height="44" rx="8" />
               <rect class="dev-screen" x="186" y="86" width="44" height="24" rx="4" />
               <path class="link" d="M124 98h14M162 98h14" />
-              <circle class="badge-no" cx="150" cy="98" r="12" />
-              <path class="cross" d="M145.5 93.5l9 9M154.5 93.5l-9 9" />
+              <circle class="badge-relay" cx="150" cy="98" r="12" />
+              <path class="bolt" d="M152.2 90.6l-7.2 9.2h4.6l-1.8 5.6 7.2-9.2h-4.6z" />
             </svg>
             <figcaption>
               <span class="net-name">شبکه‌های مختلف</span>
-              <span class="net-chip is-soon">به‌زودی</span>
-              <span class="net-desc">با رله، از هر جایی</span>
+              <span class="net-chip is-relay">با رله</span>
+              <span class="net-desc">تا ۲۰۰ مگابایت، از هر جایی</span>
             </figcaption>
           </figure>
         </div>

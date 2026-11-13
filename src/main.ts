@@ -212,6 +212,8 @@ function describeError(code: string, detail?: TransferDiagnostics): string {
     }
     case 'channel-closed':
       return 'طرف مقابل قطع شد. صفحه را نبند تا انتقال تمام شود.';
+    case 'file-too-large':
+      return `این انتقال از مسیر رله می‌گذرد و فعلاً تا ۲۰۰ مگابایت پذیرفته می‌شود. اگر هر دو دستگاه روی یک وای‌فای باشند، فایل‌های بزرگ‌تر هم بدون سقف می‌روند.`;
     case 'send-failed':
       return 'فرستادن متوقف شد. اگر طرف مقابل صفحه را بسته باشد، همان اتفاق افتاده است.';
     default:

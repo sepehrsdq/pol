@@ -8,7 +8,7 @@ Send a file straight from one browser to another. Pick a file, get four words, h
 
 **Live demo:** https://qqsp.ir/ — the page and the signaling server are the same origin, so there is nothing to configure.
 
-> **Same network for now.** Both devices have to be on the same network. Crossing from one network to another needs a TURN relay, and no relay is wired up yet — that is the next milestone.
+> **Same network: direct and unlimited. Different networks: relayed, up to 200 MB.** When both devices share a network the transfer is direct with no size cap. Across networks the traffic goes through a TURN relay, and relay transfers are capped at 200 MB for now.
 
 ## What it does
 
@@ -35,11 +35,14 @@ For a deployment build, point it at your signaling server:
 VITE_SIGNAL_URL=wss://example.com/signal npm run build
 ```
 
-The client asks the signaling server for ICE servers at `GET /ice`, so TURN can
-be added without rebuilding the client. STUN is built in.
+The client asks the signaling server for ICE servers at `GET /ice`. STUN is built in; TURN comes from [Metered](https://metered.ca) (free tier, 20 GB/month) when `METERED_APP` and `METERED_KEY` are set. Self-hosted coturn still works:
 
 ```bash
-# server env
+# server env — managed TURN (used first)
+METERED_APP=your-app        # the part before .metered.live in the dashboard URL
+METERED_KEY=...             # API key of the TURN credential
+
+# or self-hosted TURN (fallback when METERED_* is absent)
 TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:443
 TURN_SECRET=...            # coturn REST secret: short-lived credentials per client
 # or static credentials:
@@ -47,8 +50,10 @@ TURN_USERNAME=...
 TURN_PASSWORD=...
 ```
 
+The API key never reaches the browser: the server fetches short-lived credentials, caches them for 10 minutes, and hands those to clients.
+
 ```bash
-npm test        # 41 tests: word codes, file sizes, SHA-256, ICE config
+npm test        # 50 tests: word codes, file sizes, SHA-256, ICE config, Metered
 npm run build   # typecheck + production build
 ```
 
@@ -65,7 +70,7 @@ The sender creates a data channel and offers; the receiver answers. Files are sl
 
 Known limits:
 
-- STUN is built in, so most home networks connect directly. Without a TURN relay, symmetric NAT and restrictive firewalls can still block the path — treat two different networks as unsupported for now.
+- STUN is built in, so most home networks connect directly. Cross-network transfers go through a TURN relay and are capped at 200 MB for now; symmetric NAT and restrictive firewalls can still block even the relay path in rare cases.
 - One file per session; folders and resume-after-disconnect are not built yet.
 - The file is assembled in the tab's memory, so multi-gigabyte transfers are not practical yet.
 - If the signal server is malicious it could theoretically sit in the middle. The code does not protect against that yet.
@@ -76,7 +81,7 @@ Known limits:
 
 دموی زنده: https://qqsp.ir/
 
-**فعلاً هر دو دستگاه باید روی یک شبکه باشند.** عبور از دو شبکهٔ جدا به رلهٔ TURN نیاز دارد و رله هنوز وصل نیست؛ نسخهٔ بعد همین است.
+**یک شبکه: مستقیم و بدون سقف. شبکه‌های جدا: با رله، تا ۲۰۰ مگابایت.** وقتی هر دو دستگاه روی یک شبکه‌اند، فایل مستقیم و بدون محدودیت حجم جابه‌جا می‌شود. بین دو شبکهٔ جدا ترافیک از رلهٔ TURN می‌گذرد و فعلاً تا ۲۰۰ مگابایت پذیرفته می‌شود.
 
 ```bash
 npm install
@@ -85,7 +90,7 @@ npm run dev          # ترمینال دوم
 ```
 
 - کد چهارکلمه‌ای فقط شناسهٔ اتاق است، نه رمز. رمزنگاری از خود WebRTC می‌آید.
-- STUN داخل خود برنامه است، پس بیشتر شبکه‌های خانگی مستقیم وصل می‌شوند. بدون رلهٔ TURN، دو شبکهٔ جدا فعلاً پشتیبانی نمی‌شوند.
+- STUN داخل خود برنامه است، پس بیشتر شبکه‌های خانگی مستقیم وصل می‌شوند. انتقال بین دو شبکهٔ جدا از رلهٔ TURN می‌گذرد و فعلاً سقف ۲۰۰ مگابایت دارد.
 - هر نشست یک فایل؛ پوشه و ادامهٔ انتقال بعد از قطعی هنوز نیست.
 - فایل در حافظهٔ تب جمع می‌شود؛ برای فایل چند گیگابایتی مناسب نیست.
 - سلامت فایل با SHA-256 بررسی می‌شود و در پایان، نتیجه روی هر دو طرف دیده می‌شود. هش هم‌زمان با ارسال حساب می‌شود، پس فایل بزرگ قبل از شروع یک دور اضافه خوانده نمی‌شود.

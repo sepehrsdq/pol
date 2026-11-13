@@ -5,6 +5,11 @@ const CHUNK_SIZE = 64 * 1024;
 const READ_SIZE = 1024 * 1024;
 const HIGH_WATER = 4 * 1024 * 1024;
 const LOW_WATER = 1 * 1024 * 1024;
+/**
+ * Relay traffic (cross-network transfers) is capped by the TURN plan.
+ * Direct transfers on the same network have no size limit.
+ */
+export const RELAY_SIZE_LIMIT = 200 * 1024 * 1024;
 
 /** Give the first ICE attempt this long before restarting once. */
 const RESTART_AFTER_MS = 11_000;
@@ -35,7 +40,7 @@ export interface VerifyResult {
   blob: Blob | null;
 }
 
-export type TransferError = 'connection-failed' | 'channel-closed' | 'send-failed';
+export type TransferError = 'connection-failed' | 'channel-closed' | 'send-failed' | 'file-too-large';
 
 /** What the browser managed to gather, so a failure can be explained. */
 export interface TransferDiagnostics {
@@ -161,6 +166,11 @@ export class Transfer {
     return { candidates: [...this.candidateTypes], iceErrors: [...this.iceErrors] };
   }
 
+  /** True when the selected pair includes a TURN relay (cross-network path). */
+  private usedRelay(): boolean {
+    return this.candidateTypes.has('relay');
+  }
+
   /** Only start counting once an offer or answer is actually on the wire. */
   private startGiveUpTimer(ms: number): void {
     window.clearTimeout(this.giveUpTimer);
@@ -266,6 +276,8 @@ export class Transfer {
   /**
    * Stream the file and hash it in the same pass, so the sender never has to
    * read a large file twice. The digest travels with the final "end" message.
+   * When the connection went through a relay, files above RELAY_SIZE_LIMIT
+   * are refused before the first byte moves.
    */
   async sendFile(file: File): Promise<void> {
     const channel = this.channel;
@@ -275,6 +287,12 @@ export class Transfer {
     }
 
     await waitOpen(channel);
+
+    if (this.usedRelay() && file.size > RELAY_SIZE_LIMIT) {
+      trace('relay limit', file.size);
+      this.events.onError('file-too-large');
+      return;
+    }
 
     const meta: FileMeta = {
       name: file.name,
