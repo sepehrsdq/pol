@@ -166,9 +166,60 @@ export class Transfer {
     return { candidates: [...this.candidateTypes], iceErrors: [...this.iceErrors] };
   }
 
-  /** True when the selected pair includes a TURN relay (cross-network path). */
-  private usedRelay(): boolean {
-    return this.candidateTypes.has('relay');
+  /** Cached answer of usesRelay(); null until the stats say one way or another. */
+  private relaySelected: boolean | null = null;
+
+  /**
+   * True only when the *selected* pair actually goes through a TURN relay.
+   * Gathering is not selection: with a TURN server configured the browser
+   * always collects relay candidates, so counting gathered ones would cap
+   * every transfer — even direct ones on the same network.
+   */
+  private async usesRelay(): Promise<boolean> {
+    if (this.relaySelected !== null) return this.relaySelected;
+    // The selected pair can lag the open event by a beat; retry a few times.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const found = await this.selectedPairIsRelay();
+      if (found !== null) {
+        this.relaySelected = found;
+        return found;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+    }
+    trace('selected pair unknown; assuming direct');
+    this.relaySelected = false;
+    return false;
+  }
+
+  /** null when this stats snapshot has no selected pair yet. */
+  private async selectedPairIsRelay(): Promise<boolean | null> {
+    try {
+      const stats = await this.pc.getStats();
+      let pairLocalId = '';
+      stats.forEach((value) => {
+        const report = value as unknown as Record<string, unknown>;
+        if (
+          report.type === 'candidate-pair' &&
+          report.state === 'succeeded' &&
+          (report.selected === true || report.nominated === true) &&
+          typeof report.localCandidateId === 'string'
+        ) {
+          pairLocalId = report.localCandidateId;
+        }
+      });
+      if (!pairLocalId) return null;
+      let isRelay = false;
+      stats.forEach((value) => {
+        const report = value as unknown as Record<string, unknown>;
+        if (report.type === 'local-candidate' && report.id === pairLocalId) {
+          isRelay = report.candidateType === 'relay';
+        }
+      });
+      return isRelay;
+    } catch (error) {
+      trace('getStats failed', error);
+      return false;
+    }
   }
 
   /** Only start counting once an offer or answer is actually on the wire. */
@@ -288,7 +339,7 @@ export class Transfer {
 
     await waitOpen(channel);
 
-    if (this.usedRelay() && file.size > RELAY_SIZE_LIMIT) {
+    if (file.size > RELAY_SIZE_LIMIT && (await this.usesRelay())) {
       trace('relay limit', file.size);
       this.events.onError('file-too-large');
       return;
