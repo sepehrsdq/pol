@@ -1080,6 +1080,191 @@ input[type='text']:hover {
   word-break: break-all;
 }
 
+/* Result entrance: card pops, mark draws itself. */
+
+.result.is-animated {
+  animation: result-in 420ms cubic-bezier(0.22, 1.2, 0.32, 1) both;
+}
+
+@keyframes result-in {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.result-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.result-mark {
+  width: 26px;
+  height: 26px;
+  flex: none;
+}
+
+.result-mark-circle {
+  fill: var(--ok-soft);
+  stroke: var(--ok);
+  stroke-width: 2;
+}
+
+.result-mark-tick {
+  fill: none;
+  stroke: var(--ok);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 20;
+  stroke-dashoffset: 20;
+}
+
+.result-mark.is-drawn .result-mark-tick {
+  animation: tick-draw 480ms 160ms cubic-bezier(0.3, 0, 0.2, 1) forwards;
+}
+
+.result-mark.is-fail .result-mark-circle {
+  stroke: var(--accent);
+  fill: var(--panel);
+}
+
+.result-mark.is-fail .result-mark-tick {
+  stroke: var(--accent);
+  stroke-dashoffset: 0;
+  opacity: 0.4;
+}
+
+@keyframes tick-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Session: totals, ETA, per-file list. */
+
+.session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.session-chip {
+  padding: 1px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--panel);
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.session-eta.is-ticking {
+  color: var(--accent);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  animation: eta-breathe 2s ease-in-out infinite;
+}
+
+@keyframes eta-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.65;
+  }
+}
+
+.session-bar {
+  margin-top: 6px;
+}
+
+.bar.is-session {
+  height: 6px;
+}
+
+.bar-fill.is-session {
+  background: var(--accent);
+  transition: width 0.2s linear;
+}
+
+.session-files {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.session-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.session-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--seg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 13px;
+  animation: item-in 320ms cubic-bezier(0.22, 0.9, 0.28, 1) both;
+}
+
+@keyframes item-in {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.session-item-mark {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.session-item-mark path {
+  fill: none;
+  stroke: var(--ok);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.session-item.is-warn .session-item-mark path {
+  stroke: var(--accent);
+}
+
+.session-item-size {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.result-session {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
 /* Steps */
 
 .steps {
@@ -1294,6 +1479,11 @@ input[type='text']:hover {
   .js-reveal [data-reveal] {
     opacity: 1;
     transform: none;
+  }
+
+  /* The drawn tick is content, not decoration: show it without motion. */
+  .result-mark-tick {
+    stroke-dashoffset: 0;
   }
 
   .btn:hover,

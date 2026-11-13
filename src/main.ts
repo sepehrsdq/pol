@@ -1,5 +1,12 @@
 import './styles.css';
-import { formatBytes, formatPercent, formatSpeed, shortenName } from './lib/format';
+import {
+  formatBytes,
+  formatDuration,
+  formatInt,
+  formatPercent,
+  formatSpeed,
+  shortenName,
+} from './lib/format';
 import { setupReveal } from './lib/reveal';
 import { trace } from './lib/trace';
 import { formatCode, makeCode, parseCode } from './lib/words';
@@ -7,10 +14,10 @@ import { loadIceServers } from './net/ice';
 import { defaultSignalUrl, SignalClient, type ServerMessage } from './net/signal';
 import { Transfer, type FileMeta, type SignalPayload, type TransferDiagnostics, type TransferRole } from './net/transfer';
 
-function el<T extends HTMLElement>(id: string): T {
+function el<T extends Element>(id: string): T {
   const node = document.getElementById(id);
   if (!node) throw new Error(`missing element #${id}`);
-  return node as T;
+  return node as unknown as T;
 }
 
 const debug = (...args: unknown[]): void => {
@@ -44,11 +51,37 @@ const bar = el<HTMLDivElement>('bar');
 const barFill = el<HTMLDivElement>('bar-fill');
 const progressSize = el<HTMLSpanElement>('progress-size');
 const progressSpeed = el<HTMLSpanElement>('progress-speed');
+const sessionMeta = el<HTMLDivElement>('session-meta');
+const sessionCount = el<HTMLSpanElement>('session-count');
+const sessionTotal = el<HTMLSpanElement>('session-total');
+const sessionEta = el<HTMLSpanElement>('session-eta');
+const sessionBarWrap = el<HTMLDivElement>('session-bar-wrap');
+const sessionBar = el<HTMLDivElement>('session-bar');
+const sessionBarFill = el<HTMLDivElement>('session-bar-fill');
+const sessionFiles = el<HTMLDivElement>('session-files');
+const sessionList = el<HTMLUListElement>('session-list');
 const result = el<HTMLDivElement>('result');
 const resultTitle = el<HTMLParagraphElement>('result-title');
 const resultHash = el<HTMLParagraphElement>('result-hash');
+const resultMark = el<SVGGraphicsElement>('result-mark');
+const resultSession = el<HTMLParagraphElement>('result-session');
+const sessionClose = el<HTMLButtonElement>('session-close');
 const download = el<HTMLAnchorElement>('download');
 const themeToggle = el<HTMLButtonElement>('theme-toggle');
+
+interface SessionFile {
+  name: string;
+  size: number;
+  ok: boolean;
+}
+
+/** One shared session: a room stays open for several files in a row. */
+const session = {
+  active: false,
+  role: 'sender' as TransferRole,
+  files: [] as SessionFile[],
+  bytes: 0,
+};
 
 let mode: 'send' | 'receive' = 'send';
 let signal: SignalClient | null = null;
@@ -63,6 +96,13 @@ let sampleTime = 0;
 let sampleBytes = 0;
 let speed = 0;
 let lastPaint = 0;
+/** Done-bytes of the file in flight, receiver-side, for the session total. */
+let sessionLastDone = 0;
+/** Bytes the sender promised so far, receiver-side (sums of meta.size). */
+let sessionBytesTotal = 0;
+/** Size and name of the file currently in flight, for the session list. */
+let lastFileSize = 0;
+let lastSentName = 'file';
 
 let connectAttempt = 0;
 
@@ -82,6 +122,7 @@ function setMode(next: 'send' | 'receive'): void {
   hideAlert();
   hideResult();
   progressCard.hidden = true;
+  sessionFiles.hidden = true;
   setStatus(null);
 }
 
@@ -133,8 +174,10 @@ function showAlert(message: string, retry?: () => void, detail?: TransferDiagnos
 
 function hideResult(): void {
   result.hidden = true;
-  result.classList.remove('is-ok', 'is-warn');
+  result.classList.remove('is-ok', 'is-warn', 'is-animated');
+  resultMark.classList.remove('is-drawn', 'is-fail');
   download.hidden = true;
+  sessionClose.hidden = true;
   if (downloadUrl) {
     URL.revokeObjectURL(downloadUrl);
     downloadUrl = null;
@@ -158,6 +201,97 @@ function resetProgress(): void {
   progressSpeed.textContent = '';
 }
 
+/* ---------- session state (v0.3: several files per room) ---------- */
+
+function sessionStart(role: TransferRole): void {
+  session.active = true;
+  session.role = role;
+  session.files = [];
+  session.bytes = 0;
+  sessionBytesTotal = 0;
+  sessionFiles.hidden = true;
+  sessionList.replaceChildren();
+}
+
+function sessionEnd(): void {
+  session.active = false;
+  sessionBytesTotal = 0;
+  sessionMeta.hidden = true;
+  sessionBarWrap.hidden = true;
+}
+
+function renderSessionMeta(): void {
+  const count = session.files.length;
+  sessionMeta.hidden = count === 0 && sessionBytesTotal === 0;
+  sessionCount.textContent = count > 0 ? `فایل ${formatInt(count)}` : '';
+  sessionTotal.textContent =
+    session.bytes > 0 ? `مجموع ${formatBytes(session.bytes)}` : '';
+}
+
+function renderSessionBar(): void {
+  sessionBarWrap.hidden = sessionBytesTotal <= 0;
+  if (sessionBytesTotal <= 0) return;
+  const ratio = Math.min(1, session.bytes / sessionBytesTotal);
+  const percent = Math.round(ratio * 100);
+  sessionBarFill.style.width = `${percent}%`;
+  sessionBar.setAttribute('aria-valuenow', String(percent));
+}
+
+/** Remaining time for the whole session, from the live speed. */
+function renderSessionEta(remainingBytes: number): void {
+  if (!session.active || remainingBytes <= 0 || speed <= 0) {
+    sessionEta.textContent = '';
+    sessionEta.classList.remove('is-ticking');
+    return;
+  }
+  const text = formatDuration(remainingBytes / speed);
+  sessionEta.textContent = text ? `حدود ${text} مانده` : '';
+  sessionEta.classList.toggle('is-ticking', Boolean(text));
+}
+
+function addSessionFile(entry: SessionFile): void {
+  session.files.push(entry);
+  session.bytes += entry.size;
+  sessionFiles.hidden = false;
+
+  const item = document.createElement('li');
+  item.className = `session-item ${entry.ok ? 'is-ok' : 'is-warn'}`;
+
+  const mark = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  mark.setAttribute('viewBox', '0 0 24 24');
+  mark.setAttribute('aria-hidden', 'true');
+  mark.classList.add('session-item-mark');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', 'M5 12.5l4.5 4.5L19 7.5');
+  mark.append(path);
+
+  const name = document.createElement('bdi');
+  name.dir = 'auto';
+  name.textContent = shortenName(entry.name);
+
+  const size = document.createElement('span');
+  size.className = 'session-item-size';
+  size.textContent = formatBytes(entry.size);
+
+  item.append(mark, name, size);
+  sessionList.append(item);
+}
+
+/** Pop the result card in: scale + settle. Re-triggerable per file. */
+function playResultAnimation(ok: boolean): void {
+  result.classList.remove('is-animated', 'is-ok', 'is-warn');
+  // Force a reflow so the animation restarts for the next file.
+  void result.offsetWidth;
+  result.classList.add('is-animated');
+  if (ok) {
+    resultMark.classList.remove('is-fail');
+    resultMark.classList.add('is-drawn');
+  } else {
+    resultMark.classList.add('is-fail');
+    resultMark.classList.remove('is-drawn');
+  }
+}
+
 function teardown(): void {
   transfer?.close();
   transfer = null;
@@ -169,6 +303,7 @@ function teardown(): void {
 
 function reset(): void {
   teardown();
+  sessionEnd();
   setStatus(null);
   progressCard.hidden = true;
   hideResult();
@@ -225,6 +360,7 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
   return new Transfer(role, iceServers, (payload: SignalPayload) => signal?.relay(payload), {
     onState: (state) => {
       if (state === 'open' && role === 'sender' && selectedFile) {
+        if (!session.active) sessionStart(role);
         void sendSelected(selectedFile);
       }
       if (state === 'closed' && busy) {
@@ -236,6 +372,9 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
       progressCard.hidden = false;
       resetProgress();
       receivedName = meta.name;
+      lastFileSize = meta.size;
+      if (!session.active) sessionStart(role);
+      sessionBytesTotal += meta.size;
       progressName.textContent = shortenName(meta.name);
       progressSize.textContent = `۰ بایت از ${formatBytes(meta.size)}`;
       setStatus('فایل پیدا شد؛ انتقال شروع می‌شود.', true);
@@ -243,12 +382,25 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
     onProgress: (done, total) => {
       bridge.classList.add('is-active');
       trackProgress(done, total);
+      // Session bytes: sender promises upfront, receiver counts as they land.
+      if (session.role === 'receiver') {
+        session.bytes = session.bytes - (sessionLastDone ?? 0) + done;
+        sessionLastDone = done;
+        renderSessionMeta();
+        renderSessionBar();
+      }
+      renderSessionEta(Math.max(0, total - done));
     },
     onVerified: ({ checked, ok, received, blob }) => {
       busy = false;
       bridge.classList.remove('is-active');
       setBar(1);
       setStatus(null);
+      renderSessionEta(0);
+      addSessionFile({ name: receivedName, size: sessionBytesTotal > 0 ? lastFileSize : 0, ok: checked && ok });
+      renderSessionMeta();
+      renderSessionBar();
+      playResultAnimation(checked && ok);
       if (!blob) return;
 
       downloadUrl = URL.createObjectURL(blob);
@@ -270,6 +422,10 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
         resultTitle.textContent = 'فایل رسید، ولی هش نمی‌خواند. ممکن است ناقص رسیده باشد.';
         resultHash.textContent = `SHA-256: ${received ?? ''}`;
       }
+      resultSession.hidden = true;
+      // The room stays open for the next file; say so, and offer a clean end.
+      sessionClose.hidden = false;
+      sessionClose.textContent = 'پایان نشست';
     },
     onAck: (ok) => {
       busy = false;
@@ -278,6 +434,11 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
       setBar(1);
       progressSpeed.textContent = '';
       setStatus(null);
+      renderSessionEta(0);
+      addSessionFile({ name: lastSentName, size: lastFileSize, ok });
+      renderSessionMeta();
+      renderSessionBar();
+      playResultAnimation(ok);
 
       result.hidden = false;
       result.classList.add(ok ? 'is-ok' : 'is-warn');
@@ -285,6 +446,9 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
         ? 'طرف مقابل فایل را گرفت و هش تأیید شد.'
         : 'فایل رفت، ولی طرف مقابل گفت هش نمی‌خواند. یک بار دیگر بفرست.';
       resultHash.textContent = '';
+      resultSession.hidden = true;
+      sessionClose.hidden = false;
+      sessionClose.textContent = 'پایان نشست';
     },
     onError: (code, detail) => {
       busy = false;
@@ -309,6 +473,9 @@ async function sendSelected(file: File): Promise<void> {
   if (!transfer) return;
 
   busy = true;
+  lastSentName = file.name;
+  lastFileSize = file.size;
+  sessionBytesTotal += file.size;
   hideAlert();
   hideResult();
   progressCard.hidden = false;
@@ -316,6 +483,8 @@ async function sendSelected(file: File): Promise<void> {
   progressSpeed.textContent = '';
   setStatus('در حال فرستادن…', true);
   resetProgress();
+  renderSessionMeta();
+  renderSessionBar();
   bridge.classList.add('is-active');
 
   await transfer.sendFile(file);
@@ -398,17 +567,23 @@ function handleServerMessage(message: ServerMessage, role: TransferRole): void {
 }
 
 function startSending(file: File): void {
-  reset();
-  const words = makeCode();
+  // A live session keeps its room and history: the next file rides the same
+  // connection. Only a fresh start (no session) builds a new code.
+  const continuing = session.active && !busy;
+  if (!continuing) reset();
+  if (!session.active) sessionStart('sender');
+  const words = activeWords ?? makeCode();
   activeWords = words;
 
-  codeBox.replaceChildren(
-    ...words.map((word) => {
-      const span = document.createElement('span');
-      span.textContent = word;
-      return span;
-    }),
-  );
+  if (!continuing) {
+    codeBox.replaceChildren(
+      ...words.map((word) => {
+        const span = document.createElement('span');
+        span.textContent = word;
+        return span;
+      }),
+    );
+  }
   picked.replaceChildren();
   const nameNode = document.createElement('bdi');
   nameNode.dir = 'ltr';
@@ -418,6 +593,11 @@ function startSending(file: File): void {
   hideResult();
   hideAlert();
 
+  if (continuing && transfer) {
+    // Channel is already open; just queue the next file.
+    void sendSelected(file);
+    return;
+  }
   void connect('sender', formatCode(words), file);
 }
 
@@ -502,6 +682,7 @@ window.addEventListener('drop', (event) => event.preventDefault());
 
 copyButton.addEventListener('click', () => void copyCode());
 cancelButton.addEventListener('click', () => reset());
+sessionClose.addEventListener('click', () => reset());
 
 joinForm.addEventListener('submit', (event) => {
   event.preventDefault();

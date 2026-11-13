@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatPercent, formatSpeed, shortenName } from './format';
+import { formatBytes, formatDuration, formatInt, formatPercent, formatSpeed, shortenName } from './format';
 
 describe('formatBytes', () => {
   it('handles zero and negatives', () => {
@@ -41,6 +41,36 @@ describe('formatSpeed', () => {
 
   it('appends the Persian phrase', () => {
     expect(formatSpeed(2 * 1024 * 1024)).toContain('بر ثانیه');
+  });
+});
+
+describe('formatDuration', () => {
+  it('is empty for unknown or passed times', () => {
+    expect(formatDuration(0)).toBe('');
+    expect(formatDuration(-3)).toBe('');
+    expect(formatDuration(Number.NaN)).toBe('');
+  });
+
+  it('shows plain seconds under a minute', () => {
+    expect(formatDuration(45)).toMatch(/^۴۵ ثانیه$/);
+  });
+
+  it('drops zero seconds from minutes', () => {
+    expect(formatDuration(120)).toMatch(/^۲ دقیقه$/);
+    expect(formatDuration(125)).toMatch(/^۲ دقیقه و ۵ ثانیه$/);
+  });
+
+  it('rolls into hours', () => {
+    expect(formatDuration(3600)).toMatch(/^۱ ساعت$/);
+    expect(formatDuration(3660)).toMatch(/^۱ ساعت و ۱ دقیقه$/);
+  });
+});
+
+describe('formatInt', () => {
+  it('formats counts in Persian digits', () => {
+    expect(formatInt(3)).toMatch(/^۳$/);
+    expect(formatInt(12)).toMatch(/^۱۲$/);
+    expect(formatInt(Number.NaN)).toBe('۰');
   });
 });
 

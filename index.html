@@ -239,12 +239,35 @@
             <span id="progress-size"></span>
             <span id="progress-speed"></span>
           </div>
+          <div class="session-meta" id="session-meta" hidden>
+            <span id="session-count" class="session-chip"></span>
+            <span id="session-total" class="session-total"></span>
+            <span id="session-eta" class="session-eta"></span>
+          </div>
+          <div class="session-bar" id="session-bar-wrap" hidden>
+            <div class="bar session-bar-track" role="progressbar" aria-label="پیشرفت کل نشست" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="session-bar">
+              <div class="bar-fill is-session" id="session-bar-fill"></div>
+            </div>
+          </div>
         </div>
 
         <div class="result" id="result" hidden>
-          <p class="result-title" id="result-title"></p>
+          <div class="result-head">
+            <svg class="result-mark" id="result-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <circle class="result-mark-circle" cx="12" cy="12" r="10" />
+              <path class="result-mark-tick" d="M7.5 12.5l3 3 6-7" />
+            </svg>
+            <p class="result-title" id="result-title"></p>
+          </div>
           <p class="result-hash" id="result-hash" dir="ltr"></p>
           <a class="btn btn-primary" id="download" download hidden>دانلود فایل</a>
+          <p class="result-session" id="result-session" hidden></p>
+          <button type="button" class="btn btn-ghost" id="session-close" hidden>پایان نشست</button>
+        </div>
+
+        <div class="session-files" id="session-files" hidden>
+          <span class="eyebrow">فایل‌های این نشست</span>
+          <ul class="session-list" id="session-list"></ul>
         </div>
       </section>
 

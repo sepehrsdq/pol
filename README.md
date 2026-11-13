@@ -12,6 +12,7 @@ Send a file straight from one browser to another. Pick a file, get four words, h
 
 ## What it does
 
+- **Multi-file sessions** — the room stays open after a transfer: drop the next file and it rides the same connection, no new code. Both sides keep a per-session list with sizes and a total, and the sender sees an ETA while a file is in flight.
 - **Four-word code** — four Persian words from a 64-word list, easy to read over the phone and type on a mobile keyboard.
 - **Direct transfer** — file bytes only use the data channel. The signal server introduces the two browsers and relays SDP/ICE; it never sees the file.
 - **Integrity check** — both sides hash while the bytes move, and the digest rides along with the last control message. There is no separate pass over the file, so a large file starts sending right away and never needs its size in RAM twice.
@@ -53,7 +54,8 @@ TURN_PASSWORD=...
 The API key never reaches the browser: the server fetches short-lived credentials, caches them for 10 minutes, and hands those to clients.
 
 ```bash
-npm test        # 50 tests: word codes, file sizes, SHA-256, ICE config, Metered
+npm test        # 55 tests: word codes, file sizes, SHA-256, ICE config, Metered
+npm run e2e     # real-Chrome transfer test: two files, one session
 npm run build   # typecheck + production build
 ```
 
@@ -71,13 +73,13 @@ The sender creates a data channel and offers; the receiver answers. Files are sl
 Known limits:
 
 - STUN is built in, so most home networks connect directly. Cross-network transfers go through a TURN relay and are capped at 200 MB for now; symmetric NAT and restrictive firewalls can still block even the relay path in rare cases.
-- One file per session; folders and resume-after-disconnect are not built yet.
+- One code per session, but several files per session: after each file the room stays open — drop the next file to continue, or press «پایان نشست» to close. Folders and resume-after-disconnect are not built yet.
 - The file is assembled in the tab's memory, so multi-gigabyte transfers are not practical yet.
 - If the signal server is malicious it could theoretically sit in the middle. The code does not protect against that yet.
 
 ## فارسی
 
-**پل** یک ایردراپ مرورگری است: فایل را روی یک دستگاه انتخاب می‌کنی، یک کد چهارکلمه‌ای می‌گیری، طرف مقابل کد را می‌زند و فایل مستقیم بین دو مرورگر جابه‌جا می‌شود. هیچ فایلی آپلود نمی‌شود و هیچ اکانتی لازم نیست.
+**پل** یک ایردراپ مرورگری است: فایل را روی یک دستگاه انتخاب می‌کنی، یک کد چهارکلمه‌ای می‌گیری، طرف مقابل کد را می‌زند و فایل مستقیم بین دو مرورگر جابه‌جا می‌شود. هیچ فایلی آپلود نمی‌شود و هیچ اکانتی لازم نیست. در یک نشست می‌توانی چند فایل پشت‌سرهم بفرستی.
 
 دموی زنده: https://qqsp.ir/
 
@@ -91,7 +93,7 @@ npm run dev          # ترمینال دوم
 
 - کد چهارکلمه‌ای فقط شناسهٔ اتاق است، نه رمز. رمزنگاری از خود WebRTC می‌آید.
 - STUN داخل خود برنامه است، پس بیشتر شبکه‌های خانگی مستقیم وصل می‌شوند. انتقال بین دو شبکهٔ جدا از رلهٔ TURN می‌گذرد و فعلاً سقف ۲۰۰ مگابایت دارد.
-- هر نشست یک فایل؛ پوشه و ادامهٔ انتقال بعد از قطعی هنوز نیست.
+- هر نشست چند فایل: بعد از هر فایل اتاق باز می‌ماند — فایل بعدی را بگذار تا با همان اتصال برود، یا «پایان نشست» را بزن. پوشه و ادامهٔ انتقال بعد از قطعی هنوز نیست.
 - فایل در حافظهٔ تب جمع می‌شود؛ برای فایل چند گیگابایتی مناسب نیست.
 - سلامت فایل با SHA-256 بررسی می‌شود و در پایان، نتیجه روی هر دو طرف دیده می‌شود. هش هم‌زمان با ارسال حساب می‌شود، پس فایل بزرگ قبل از شروع یک دور اضافه خوانده نمی‌شود.
 

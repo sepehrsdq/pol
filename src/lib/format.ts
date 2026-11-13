@@ -27,6 +27,31 @@ export function formatSpeed(bytesPerSecond: number): string {
   return `${formatBytes(bytesPerSecond)} بر ثانیه`;
 }
 
+/** Persian integer, for counts like file totals. */
+export function formatInt(value: number): string {
+  if (!Number.isFinite(value)) return '۰';
+  return faInteger.format(Math.round(value));
+}
+
+/** Human remaining time: «۴۲ ثانیه», «۲ دقیقه و ۵ ثانیه». Empty when unknown. */
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '';
+  const total = Math.round(seconds);
+  if (total < 60) return `${faInteger.format(total)} ثانیه`;
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  if (minutes < 60) {
+    return rest > 0
+      ? `${faInteger.format(minutes)} دقیقه و ${faInteger.format(rest)} ثانیه`
+      : `${faInteger.format(minutes)} دقیقه`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  return restMinutes > 0
+    ? `${faInteger.format(hours)} ساعت و ${faInteger.format(restMinutes)} دقیقه`
+    : `${faInteger.format(hours)} ساعت`;
+}
+
 /** Keep the start and the extension, compress the middle. */
 export function shortenName(name: string, max = 42): string {
   if (name.length <= max) return name;

@@ -197,7 +197,7 @@ async function launchChrome(profileDir) {
   throw new Error('Chrome CDP never came up');
 }
 
-async function putFileInSender(tab, file) {
+async function putFileInSender(tab, fileName = 'e2e.bin') {
   // Build the File in the page, drop it into the input via DataTransfer.
   const injected = await tab.evaluate(
     async (name, mime, byteLength) => {
@@ -220,7 +220,7 @@ async function putFileInSender(tab, file) {
       const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
       return { name: file.name, size: file.size, sha256: [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('') };
     },
-    'e2e.bin',
+    fileName,
     'application/octet-stream',
     FILE_SIZE,
   );
@@ -247,7 +247,7 @@ async function submitCode(receiverTab, code) {
   if (!submitted) throw new Error('code submit failed');
 }
 
-async function waitForReceiverResult(receiverTab, timeoutMs = 60_000) {
+async function waitForReceiverResult(receiverTab, timeoutMs = 60_000, previousHash = null) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const snapshot = await receiverTab.evaluate(() => {
@@ -266,7 +266,9 @@ async function waitForReceiverResult(receiverTab, timeoutMs = 60_000) {
       };
     });
     if (snapshot.alert) throw new Error(`receiver alert: ${snapshot.alert}`);
-    if (snapshot.resultVisible && snapshot.hash) return snapshot;
+    // previousHash: the card may still show the last file's result; wait for a new one.
+    const fresh = snapshot.hash && (!previousHash || !snapshot.hash.includes(previousHash));
+    if (snapshot.resultVisible && fresh) return snapshot;
     await sleep(500);
   }
   throw new Error('receiver never showed a verified result');
@@ -325,28 +327,61 @@ async function main() {
     const receiverTab = await CdpTab.open(BASE);
     log('two tabs open');
 
-    const file = await putFileInSender(senderTab);
-    log(`file injected: ${file.name} ${file.size} bytes, sha ${file.sha256.slice(0, 12)}…`);
+    // --- file 1: opens the room and the session ---
+    const file1 = await putFileInSender(senderTab, 'e2e-one.bin');
+    log(`file 1 injected: ${file1.size} bytes, sha ${file1.sha256.slice(0, 12)}…`);
 
     const code = await readReceiverCode(senderTab);
     log(`room code: ${code}`);
     await submitCode(receiverTab, code);
 
-    const result = await waitForReceiverResult(receiverTab);
+    const result1 = await waitForReceiverResult(receiverTab);
     await waitForSenderAck(senderTab).catch(() => {
-      // The sender side page may reset its result on tab focus quirks; the
-      // receiver's verified hash is the contract that matters.
-      log('sender ack not observed; relying on receiver result');
+      log('sender ack not observed for file 1; relying on receiver result');
     });
-
-    const receivedHash = (result.hash.match(/[0-9a-f]{64}/) ?? [])[0];
-    if (!receivedHash) throw new Error(`receiver hash unreadable: ${result.hash}`);
-    if (receivedHash !== file.sha256) {
-      fail(`hash mismatch\n  expected ${file.sha256}\n  received ${receivedHash}`);
+    const hash1 = (result1.hash.match(/[0-9a-f]{64}/) ?? [])[0];
+    if (hash1 !== file1.sha256) {
+      fail(`file 1 hash mismatch\n  expected ${file1.sha256}\n  received ${hash1}`);
       return;
     }
-    log(`hash matched: ${receivedHash.slice(0, 12)}…`);
-    log('E2E PASS');
+    log(`file 1 hash matched: ${hash1.slice(0, 12)}…`);
+
+    // --- file 2: same room, same session, no new code ---
+    const file2 = await putFileInSender(senderTab, 'e2e-two.bin');
+    log(`file 2 injected: ${file2.size} bytes, sha ${file2.sha256.slice(0, 12)}…`);
+
+    const result2 = await waitForReceiverResult(receiverTab, 90_000, file1.sha256);
+    const hash2 = (result2.hash.match(/[0-9a-f]{64}/) ?? [])[0];
+    if (hash2 !== file2.sha256) {
+      fail(`file 2 hash mismatch\n  expected ${file2.sha256}\n  received ${hash2}`);
+      return;
+    }
+    log(`file 2 hash matched: ${hash2.slice(0, 12)}…`);
+
+    // --- session state: two files listed, sender still shows the same code ---
+    const sessionState = await Promise.all([
+      receiverTab.evaluate(() => ({
+        items: document.querySelectorAll('#session-list li').length,
+        sessionFilesVisible: !document.getElementById('session-files')?.hidden,
+        sessionChip: document.getElementById('session-count')?.textContent ?? '',
+      })),
+      senderTab.evaluate(() => ({
+        items: document.querySelectorAll('#session-list li').length,
+        codeStillVisible: !document.getElementById('code-card')?.hidden,
+        codeWords: [...document.querySelectorAll('#code span')].map((s) => s.textContent).join(' '),
+      })),
+    ]);
+    const [receiver, sender] = sessionState;
+    if (receiver.items !== 2 || sender.items !== 2) {
+      fail(`expected 2 session items (receiver ${receiver.items}, sender ${sender.items})`);
+      return;
+    }
+    if (!sender.codeStillVisible || sender.codeWords !== code) {
+      fail(`sender code card lost: visible=${sender.codeStillVisible} words="${sender.codeWords}"`);
+      return;
+    }
+    log(`session list: receiver ${receiver.items} / sender ${sender.items}, chip "${receiver.sessionChip}", code kept "${sender.codeWords}"`);
+    log('E2E PASS (two files, one session)');
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   } finally {
