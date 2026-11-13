@@ -1,19 +1,32 @@
 // ICE server configuration for Pol.
 //
-// STUN is always included. TURN is optional and comes from the environment:
-//   TURN_URLS       comma-separated turn:/turns: URLs
-//   TURN_SECRET     shared secret for time-limited credentials (coturn REST API)
-//   TURN_TTL        credential lifetime in seconds (default 3600)
-// or static credentials:
-//   TURN_USERNAME / TURN_PASSWORD
+// STUN is always included. TURN comes from one of two sources, in order:
 //
-// The secret never reaches the browser: clients get a short-lived username
-// and an HMAC credential instead.
+// 1. Metered (https://metered.ca) — managed TURN with the free 20 GB/month
+//    tier. Configured with two env vars and nothing else:
+//      METERED_APP    app name from the dashboard (the part before .metered.live)
+//      METERED_KEY    API key of the TURN credential
+//    The server asks Metered for short-lived iceServers, caches them for
+//    CACHE_TTL_MS and hands them to clients via GET /ice.
+//
+// 2. Self-hosted TURN from the environment:
+//      TURN_URLS       comma-separated turn:/turns: URLs
+//      TURN_SECRET     shared secret for time-limited credentials (coturn REST API)
+//      TURN_TTL        credential lifetime in seconds (default 3600)
+//    or static credentials:
+//      TURN_USERNAME / TURN_PASSWORD
+//
+// Keys and secrets never reach the browser: clients get short-lived
+// credentials, or nothing at all.
 
 import { createHmac } from 'node:crypto';
 
 export const DEFAULT_STUN = ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'];
 const DEFAULT_TTL = 3600;
+const CACHE_TTL_MS = 10 * 60 * 1000;
+
+/** @type {{ servers: unknown[], fetchedAt: number } | null} */
+let meteredCache = null;
 
 export function parseList(value) {
   if (typeof value !== 'string') return [];
@@ -79,4 +92,91 @@ export function hasIncompleteTurn(env = process.env) {
     typeof env.TURN_PASSWORD === 'string' &&
     env.TURN_PASSWORD.length > 0;
   return !hasSecret && !hasStatic;
+}
+
+/**
+ * True when both METERED_APP and METERED_KEY are present.
+ * @param {Record<string, string | undefined>} env
+ */
+export function hasMetered(env = process.env) {
+  return (
+    typeof env.METERED_APP === 'string' &&
+    env.METERED_APP.trim().length > 0 &&
+    typeof env.METERED_KEY === 'string' &&
+    env.METERED_KEY.trim().length > 0
+  );
+}
+
+/** Build the Metered credentials endpoint URL. Exported for tests. */
+export function meteredUrl(app, key) {
+  const host = `${String(app).trim()}.metered.live`;
+  const url = new URL(`https://${host}/api/v1/turn/credentials`);
+  url.searchParams.set('apiKey', key);
+  return url;
+}
+
+/**
+ * Keep only entries that look like usable ICE server objects and rewrite
+ * stun: URLs the API may return — Metered already includes its own STUN.
+ * @param {unknown} value
+ */
+export function normalizeMeteredServers(value) {
+  if (!Array.isArray(value)) return [];
+  const servers = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const record = /** @type {Record<string, unknown>} */ (entry);
+    const urls =
+      typeof record.urls === 'string'
+        ? [record.urls]
+        : Array.isArray(record.urls)
+          ? record.urls.filter((u) => typeof u === 'string')
+          : [];
+    const usable = urls.filter((u) => /^(stun|turn|turns):/i.test(u.trim()));
+    if (usable.length === 0) continue;
+    const server = { urls: usable };
+    if (typeof record.username === 'string' && record.username.length > 0) {
+      server.username = record.username;
+    }
+    if (typeof record.credential === 'string' && record.credential.length > 0) {
+      server.credential = record.credential;
+    }
+    servers.push(server);
+  }
+  return servers;
+}
+
+/**
+ * Fetch short-lived iceServers from Metered, with a small in-memory cache so
+ * parallel /ice requests do not hammer the API. Throws on failure; callers
+ * fall back to self-hosted or static config.
+ * @param {Record<string, string | undefined>} env
+ * @param {{ fetch?: typeof fetch, now?: number }} [deps]
+ * @returns {Promise<{ iceServers: unknown[], ttl: number, cached: boolean }>}
+ */
+export async function fetchMeteredServers(env = process.env, deps = {}) {
+  const doFetch = deps.fetch ?? fetch;
+  const now = deps.now ?? Date.now();
+
+  if (meteredCache && now - meteredCache.fetchedAt < CACHE_TTL_MS) {
+    return { iceServers: meteredCache.servers, ttl: 0, cached: true };
+  }
+
+  const response = await doFetch(meteredUrl(env.METERED_APP, env.METERED_KEY));
+  if (!response.ok) {
+    throw new Error(`metered ${response.status}`);
+  }
+  const body = await response.json();
+  const servers = normalizeMeteredServers(body);
+  if (servers.length === 0) {
+    throw new Error('metered returned no usable ice servers');
+  }
+
+  meteredCache = { servers, fetchedAt: now };
+  return { iceServers: servers, ttl: 0, cached: false };
+}
+
+/** Test hook: forget the cached Metered response. */
+export function resetMeteredCache() {
+  meteredCache = null;
 }

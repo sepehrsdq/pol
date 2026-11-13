@@ -17,7 +17,12 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, resolve, sep } from 'node:path';
 import { WebSocketServer } from 'ws';
-import { buildIceServers, hasIncompleteTurn } from './ice.mjs';
+import {
+  buildIceServers,
+  fetchMeteredServers,
+  hasIncompleteTurn,
+  hasMetered,
+} from './ice.mjs';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const HEARTBEAT_MS = 30_000;
@@ -134,7 +139,29 @@ function serveClient(request, response) {
   sendFile(request, response, filePath);
 }
 
-const server = createServer((request, response) => {
+/**
+ * ICE list for /ice, in priority order:
+ *   1. Metered (METERED_APP + METERED_KEY) — managed TURN, cached in memory.
+ *   2. Self-hosted TURN from TURN_URLS + TURN_SECRET / TURN_USERNAME.
+ *   3. Public STUN only.
+ * A Metered outage never takes the endpoint down: it degrades to the next
+ * source and the transfer can still go direct or via STUN.
+ * @returns {Promise<{ iceServers: unknown[], ttl: number }>}
+ */
+async function resolveIceServers() {
+  if (hasMetered()) {
+    try {
+      const { iceServers } = await fetchMeteredServers();
+      return { iceServers, ttl: 0 };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.warn(`metered turn unavailable (${reason}); falling back to env config`);
+    }
+  }
+  return buildIceServers();
+}
+
+const server = createServer(async (request, response) => {
   let pathname = '/';
   try {
     pathname = new URL(request.url ?? '/', 'http://localhost').pathname;
@@ -162,7 +189,7 @@ const server = createServer((request, response) => {
       'cache-control': 'no-store',
       'access-control-allow-origin': '*',
     });
-    response.end(JSON.stringify(buildIceServers()));
+    response.end(JSON.stringify(await resolveIceServers()));
     return;
   }
   if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -256,10 +283,11 @@ const sweeper = setInterval(() => {
 
 wss.on('close', () => clearInterval(sweeper));
 
-const bootIce = buildIceServers();
-const turnConfigured = bootIce.iceServers.some((entry) =>
-  (Array.isArray(entry.urls) ? entry.urls : [entry.urls]).some((url) => /^turns?:/i.test(url)),
-);
+const bootIce = await resolveIceServers();
+const turnConfigured = bootIce.iceServers.some((entry) => {
+  const urls = entry && typeof entry === 'object' ? entry.urls : entry;
+  return (Array.isArray(urls) ? urls : [urls]).some((url) => /^turns?:/i.test(String(url)));
+});
 if (hasIncompleteTurn()) {
   console.warn('TURN_URLS is set but TURN_SECRET or TURN_USERNAME/TURN_PASSWORD is missing; serving STUN only.');
 }

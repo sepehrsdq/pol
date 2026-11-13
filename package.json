@@ -6,8 +6,8 @@
   "description": "Browser-to-browser file transfer. Nothing is uploaded.",
   "scripts": {
     "dev": "vite",
-    "dev:signal": "node server/signal.mjs",
-    "start": "node server/signal.mjs",
+    "dev:signal": "node --env-file-if-exists=.env server/signal.mjs",
+    "start": "node --env-file-if-exists=.env server/signal.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
