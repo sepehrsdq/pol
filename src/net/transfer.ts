@@ -1,4 +1,5 @@
 import { Sha256 } from '../lib/sha256';
+import { buildZip, type ZipEntry } from '../lib/zip';
 import { trace } from '../lib/trace';
 
 const CHUNK_SIZE = 64 * 1024;
@@ -10,6 +11,19 @@ const LOW_WATER = 1 * 1024 * 1024;
  * Direct transfers on the same network have no size limit.
  */
 export const RELAY_SIZE_LIMIT = 200 * 1024 * 1024;
+/** Headers + data descriptors + central directory, per archive entry. */
+const ZIP_OVERHEAD_PER_FILE = 200;
+/** Bytes held back while header patches are still possible. */
+const PATCH_WINDOW = 256 * 1024;
+
+/** One file of a folder transfer: path inside the archive plus a reader. */
+export interface FolderEntry {
+  /** Forward-slash path inside the ZIP, no leading slash. */
+  path: string;
+  size: number;
+  modified?: Date;
+  read: () => AsyncGenerator<Uint8Array>;
+}
 
 /** Give the first ICE attempt this long before restarting once. */
 const RESTART_AFTER_MS = 11_000;
@@ -325,6 +339,42 @@ export class Transfer {
   }
 
   /**
+   * Stream arbitrary byte chunks with hashing and backpressure, as
+   * `meta` → bytes → `end`. Both sendFile and the folder ZIP ride this.
+   */
+  private async streamBytes(
+    channel: RTCDataChannel,
+    name: string,
+    mime: string,
+    size: number,
+    source: AsyncGenerator<Uint8Array>,
+  ): Promise<void> {
+    const meta: FileMeta = { name, size, mime, hash: null };
+    channel.send(JSON.stringify({ kind: 'meta', ...meta }));
+
+    const hash = new Sha256();
+    try {
+      let sent = 0;
+      for await (const block of source) {
+        hash.update(block);
+        for (let inner = 0; inner < block.byteLength; inner += CHUNK_SIZE) {
+          if (channel.bufferedAmount > HIGH_WATER) await waitDrain(channel);
+          const end = Math.min(inner + CHUNK_SIZE, block.byteLength);
+          const slice = new Uint8Array(block.buffer, block.byteOffset + inner, end - inner);
+          const out = new Uint8Array(slice.byteLength);
+          out.set(slice);
+          channel.send(out);
+          sent += out.byteLength;
+          this.events.onProgress(sent, size);
+        }
+      }
+      channel.send(JSON.stringify({ kind: 'end', hash: hash.digestHex() }));
+    } catch {
+      this.events.onError('send-failed');
+    }
+  }
+
+  /**
    * Stream the file and hash it in the same pass, so the sender never has to
    * read a large file twice. The digest travels with the final "end" message.
    * When the connection went through a relay, files above RELAY_SIZE_LIMIT
@@ -345,37 +395,114 @@ export class Transfer {
       return;
     }
 
-    const meta: FileMeta = {
-      name: file.name,
-      size: file.size,
-      mime: file.type || 'application/octet-stream',
-      hash: null,
-    };
-    channel.send(JSON.stringify({ kind: 'meta', ...meta }));
-
-    const hash = new Sha256();
-    let offset = 0;
-    try {
+    const fileSource = async function* (): AsyncGenerator<Uint8Array> {
+      let offset = 0;
       while (offset < file.size) {
         // Read a megabyte at a time: a blob read per 64 KB chunk costs more
         // than the hashing itself. Chunks still go out at 64 KB.
         const buffer = await file.slice(offset, offset + READ_SIZE).arrayBuffer();
         const bytes = new Uint8Array(buffer);
-        hash.update(bytes);
-        const chunkStart = offset;
         offset += bytes.byteLength;
+        yield bytes;
+      }
+    }
 
-        for (let inner = 0; inner < bytes.byteLength; inner += CHUNK_SIZE) {
-          if (channel.bufferedAmount > HIGH_WATER) await waitDrain(channel);
-          const end = Math.min(inner + CHUNK_SIZE, bytes.byteLength);
-          channel.send(bytes.subarray(inner, end));
-          this.events.onProgress(chunkStart + end, file.size);
+    await this.streamBytes(channel, file.name, file.type || 'application/octet-stream', file.size, fileSource());
+  }
+
+  /** Send a text snippet as a synthetic .txt file — same pipeline, no chunking cost. */
+  async sendText(text: string, label = 'متن.txt'): Promise<void> {
+    const channel = this.channel;
+    if (!channel) {
+      this.events.onError('send-failed');
+      return;
+    }
+    await waitOpen(channel);
+    const bytes = new TextEncoder().encode(text);
+    const name = label.endsWith('.txt') ? label : `${label}.txt`;
+    async function* textSource(): AsyncGenerator<Uint8Array> {
+      yield bytes;
+    }
+    await this.streamBytes(channel, name, 'text/plain; charset=utf-8', bytes.byteLength, textSource());
+  }
+
+  /**
+   * Send a whole folder as a streaming ZIP: files flow through the CRC into
+   * 64 KB chunks, nothing is held in memory whole. Only headers are patched
+   * after streaming; the receiver gets one normal .zip file.
+   */
+  async sendFolder(entries: FolderEntry[], zipName = 'folder.zip'): Promise<void> {
+    const channel = this.channel;
+    if (!channel) {
+      this.events.onError('send-failed');
+      return;
+    }
+    await waitOpen(channel);
+
+    const total = entries.reduce((sum, entry) => sum + entry.size, 0) + ZIP_OVERHEAD_PER_FILE * entries.length + 128;
+    if (total > RELAY_SIZE_LIMIT && (await this.usesRelay())) {
+      trace('relay limit', total);
+      this.events.onError('file-too-large');
+      return;
+    }
+
+    const zipEntries: ZipEntry[] = entries.map((entry) => ({
+      name: entry.path,
+      size: entry.size,
+      modified: entry.modified,
+      read: () => entry.read(),
+    }));
+
+    const zipSource = async function* (): AsyncGenerator<Uint8Array> {
+      // Output buffer: patches rewrite a few header fields after streaming,
+      // so a bounded sliding buffer is enough. Blocks are kept small; the
+      // sender applies patches to bytes not yet sent.
+      const pending: Uint8Array[] = [];
+      let pendingBytes = 0;
+      let base = 0; // absolute offset of pending[0]
+      const patches: { offset: number; value: number }[] = [];
+
+      const flush = async function* (target: number): AsyncGenerator<Uint8Array> {
+        while (base < target) {
+          const part = pending.shift();
+          if (!part) break;
+          const take = Math.min(part.length, target - base);
+          yield part.subarray(0, take);
+          if (take < part.length) {
+            pending.unshift(part.subarray(take));
+          }
+          base += take;
+          pendingBytes -= take;
+        }
+      };
+
+      for await (const step of buildZip(zipEntries)) {
+        if (step.kind === 'bytes') {
+          pending.push(step.data);
+          pendingBytes += step.data.length;
+          // Keep the pipeline moving: emit everything except a small tail.
+          const safeEmit = base + pendingBytes - PATCH_WINDOW;
+          for await (const block of flush(Math.max(base, safeEmit))) yield block;
+        } else {
+          patches.push(step);
         }
       }
-      channel.send(JSON.stringify({ kind: 'end', hash: hash.digestHex() }));
-    } catch {
-      this.events.onError('send-failed');
+      // Apply remaining patches within the window, then drain everything.
+      for (const patch of patches) {
+        let acc = base;
+        for (const part of pending) {
+          if (patch.offset < acc + part.length) {
+            const dv = new DataView(part.buffer, part.byteOffset, part.byteLength);
+            dv.setUint32(patch.offset - acc, patch.value >>> 0, true);
+            break;
+          }
+          acc += part.length;
+        }
+      }
+      for await (const block of flush(base + pendingBytes)) yield block;
     }
+
+    await this.streamBytes(channel, zipName, 'application/zip', total, zipSource());
   }
 
   private handleControl(raw: string): void {

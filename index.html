@@ -181,10 +181,24 @@
               <path d="M12 16V4m0 0L7 9m5-5 5 5" />
               <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
             </svg>
-            <span class="drop-title">فایل را اینجا رها کن</span>
+            <span class="drop-title">فایل یا پوشه را اینجا رها کن</span>
             <span class="drop-hint">یا کلیک کن و از دستگاه انتخاب کن</span>
           </label>
           <input type="file" id="file" class="visually-hidden" />
+          <input type="file" id="folder" class="visually-hidden" webkitdirectory />
+
+          <div class="text-box" id="text-box">
+            <textarea
+              id="text-input"
+              rows="4"
+              placeholder="یا یک متن بچسبان… لینک، یادداشت، رمز — هر چیزی که تایپ می‌شود"
+              dir="auto"
+            ></textarea>
+            <div class="text-actions">
+              <button type="button" class="btn btn-primary" id="send-text" disabled>فرستادن متن</button>
+              <button type="button" class="btn btn-ghost" id="paste-text">چسباندن از کلیپ‌بورد</button>
+            </div>
+          </div>
 
           <div class="code-card" id="code-card" hidden>
             <span class="eyebrow">کد اتصال</span>
@@ -194,7 +208,7 @@
               <button type="button" class="btn btn-ghost" id="copy-code">کپی کد</button>
               <button type="button" class="btn btn-ghost" id="cancel">لغو</button>
             </div>
-            <p class="hint">این چهار کلمه را برای طرف مقابل بفرست. تا وصل نشده، صفحه را نبند.</p>
+            <p class="hint">این چهار کلمه را برای طرف مقابل بفرست. تا وصل نشده، صفحه را نبند. بعد از هر فایل می‌توانی فایل بعدی را بگذاری.</p>
           </div>
         </div>
 
@@ -259,8 +273,10 @@
             </svg>
             <p class="result-title" id="result-title"></p>
           </div>
+          <pre class="result-text" id="result-text" hidden dir="auto"></pre>
           <p class="result-hash" id="result-hash" dir="ltr"></p>
           <a class="btn btn-primary" id="download" download hidden>دانلود فایل</a>
+          <button type="button" class="btn btn-ghost" id="copy-text" hidden>کپی متن</button>
           <p class="result-session" id="result-session" hidden></p>
           <button type="button" class="btn btn-ghost" id="session-close" hidden>پایان نشست</button>
         </div>

@@ -12,7 +12,7 @@ import { trace } from './lib/trace';
 import { formatCode, makeCode, parseCode } from './lib/words';
 import { loadIceServers } from './net/ice';
 import { defaultSignalUrl, SignalClient, type ServerMessage } from './net/signal';
-import { Transfer, type FileMeta, type SignalPayload, type TransferDiagnostics, type TransferRole } from './net/transfer';
+import { Transfer, type FileMeta, type FolderEntry, type SignalPayload, type TransferDiagnostics, type TransferRole } from './net/transfer';
 
 function el<T extends Element>(id: string): T {
   const node = document.getElementById(id);
@@ -35,6 +35,10 @@ const views = {
 };
 const drop = el<HTMLLabelElement>('drop');
 const fileInput = el<HTMLInputElement>('file');
+const folderInput = el<HTMLInputElement>('folder');
+const textInput = el<HTMLTextAreaElement>('text-input');
+const sendTextButton = el<HTMLButtonElement>('send-text');
+const pasteTextButton = el<HTMLButtonElement>('paste-text');
 const codeCard = el<HTMLDivElement>('code-card');
 const codeBox = el<HTMLDivElement>('code');
 const picked = el<HTMLParagraphElement>('picked');
@@ -67,6 +71,8 @@ const resultMark = el<SVGGraphicsElement>('result-mark');
 const resultSession = el<HTMLParagraphElement>('result-session');
 const sessionClose = el<HTMLButtonElement>('session-close');
 const download = el<HTMLAnchorElement>('download');
+const resultText = el<HTMLPreElement>('result-text');
+const copyTextButton = el<HTMLButtonElement>('copy-text');
 const themeToggle = el<HTMLButtonElement>('theme-toggle');
 
 interface SessionFile {
@@ -86,12 +92,11 @@ const session = {
 let mode: 'send' | 'receive' = 'send';
 let signal: SignalClient | null = null;
 let transfer: Transfer | null = null;
-let selectedFile: File | null = null;
 let activeWords: string[] | null = null;
 let receivedName = 'file';
 let downloadUrl: string | null = null;
 let busy = false;
-let lastAttempt: { role: TransferRole; room: string; file: File | null } | null = null;
+let lastAttempt: { role: TransferRole; room: string } | null = null;
 let sampleTime = 0;
 let sampleBytes = 0;
 let speed = 0;
@@ -103,6 +108,7 @@ let sessionBytesTotal = 0;
 /** Size and name of the file currently in flight, for the session list. */
 let lastFileSize = 0;
 let lastSentName = 'file';
+let lastFileMime = 'application/octet-stream';
 
 let connectAttempt = 0;
 
@@ -177,6 +183,9 @@ function hideResult(): void {
   result.classList.remove('is-ok', 'is-warn', 'is-animated');
   resultMark.classList.remove('is-drawn', 'is-fail');
   download.hidden = true;
+  resultText.hidden = true;
+  resultText.textContent = '';
+  copyTextButton.hidden = true;
   sessionClose.hidden = true;
   if (downloadUrl) {
     URL.revokeObjectURL(downloadUrl);
@@ -359,9 +368,9 @@ function describeError(code: string, detail?: TransferDiagnostics): string {
 function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer {
   return new Transfer(role, iceServers, (payload: SignalPayload) => signal?.relay(payload), {
     onState: (state) => {
-      if (state === 'open' && role === 'sender' && selectedFile) {
+      if (state === 'open' && role === 'sender' && sending) {
         if (!session.active) sessionStart(role);
-        void sendSelected(selectedFile);
+        void sendNext();
       }
       if (state === 'closed' && busy) {
         busy = false;
@@ -373,6 +382,7 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
       resetProgress();
       receivedName = meta.name;
       lastFileSize = meta.size;
+      lastFileMime = meta.mime;
       if (!session.active) sessionStart(role);
       sessionBytesTotal += meta.size;
       progressName.textContent = shortenName(meta.name);
@@ -409,17 +419,28 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
       download.hidden = false;
 
       result.hidden = false;
+      // Text snippets get an inline view and a copy button instead of download.
+      const isText = lastFileMime.startsWith('text/');
+      resultText.hidden = !isText;
+      copyTextButton.hidden = !isText;
+      download.hidden = isText;
+      if (isText && blob) {
+        void blob.text().then((text) => {
+          resultText.textContent = text;
+        });
+      }
+
       if (!checked) {
         result.classList.add('is-warn');
-        resultTitle.textContent = 'فایل رسید، ولی بررسی سلامت انجام نشد.';
+        resultTitle.textContent = isText ? 'متن رسید، ولی بررسی سلامت انجام نشد.' : 'فایل رسید، ولی بررسی سلامت انجام نشد.';
         resultHash.textContent = '';
       } else if (ok) {
         result.classList.add('is-ok');
-        resultTitle.textContent = 'فایل رسید و سلامت آن تأیید شد.';
+        resultTitle.textContent = isText ? 'متن رسید و سلامت آن تأیید شد.' : 'فایل رسید و سلامت آن تأیید شد.';
         resultHash.textContent = `SHA-256: ${received ?? ''}`;
       } else {
         result.classList.add('is-warn');
-        resultTitle.textContent = 'فایل رسید، ولی هش نمی‌خواند. ممکن است ناقص رسیده باشد.';
+        resultTitle.textContent = isText ? 'متن رسید، ولی هش نمی‌خواند. ممکن است ناقص رسیده باشد.' : 'فایل رسید، ولی هش نمی‌خواند. ممکن است ناقص رسیده باشد.';
         resultHash.textContent = `SHA-256: ${received ?? ''}`;
       }
       resultSession.hidden = true;
@@ -460,7 +481,7 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
         code === 'connection-failed' && attempt
           ? () => {
               // Let the old socket close on the server before rejoining.
-              window.setTimeout(() => void connect(attempt.role, attempt.room, attempt.file), 600);
+              window.setTimeout(() => void connect(attempt.role, attempt.room), 600);
             }
           : undefined;
 
@@ -469,33 +490,28 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
   });
 }
 
-async function sendSelected(file: File): Promise<void> {
-  if (!transfer) return;
-
+function beginSending(meta: { name: string; size: number }): void {
   busy = true;
-  lastSentName = file.name;
-  lastFileSize = file.size;
-  sessionBytesTotal += file.size;
+  lastSentName = meta.name;
+  lastFileSize = meta.size;
+  sessionBytesTotal += meta.size;
   hideAlert();
   hideResult();
   progressCard.hidden = false;
-  progressName.textContent = shortenName(file.name);
+  progressName.textContent = shortenName(meta.name);
   progressSpeed.textContent = '';
   setStatus('در حال فرستادن…', true);
   resetProgress();
   renderSessionMeta();
   renderSessionBar();
   bridge.classList.add('is-active');
-
-  await transfer.sendFile(file);
 }
 
-async function connect(role: TransferRole, room: string, file: File | null): Promise<void> {
+async function connect(role: TransferRole, room: string): Promise<void> {
   const attempt = ++connectAttempt;
   teardown();
-  selectedFile = file;
   busy = true;
-  lastAttempt = { role, room, file };
+  lastAttempt = { role, room };
   setStatus('در حال آماده‌کردن مسیر اتصال…', true);
 
   const ice = await loadIceServers(defaultSignalUrl());
@@ -510,7 +526,7 @@ async function connect(role: TransferRole, room: string, file: File | null): Pro
       setStatus(null);
       showAlert(
         'ارتباط با سرور سیگنالینگ برقرار نشد. اگر نسخهٔ دمو تازه بیدار می‌شود، چند ثانیه صبر کن و دوباره بزن.',
-        () => void connect(role, room, file),
+        () => void connect(role, room),
       );
     },
   });
@@ -566,7 +582,15 @@ function handleServerMessage(message: ServerMessage, role: TransferRole): void {
   }
 }
 
-function startSending(file: File): void {
+/** What the sender queued: one file, a folder of files, or a text snippet. */
+type Sending =
+  | { kind: 'file'; file: File }
+  | { kind: 'folder'; entries: FolderEntry[]; zipName: string; totalSize: number; count: number }
+  | { kind: 'text'; text: string };
+
+let sending: Sending | null = null;
+
+function startSendingFile(file: File): void {
   // A live session keeps its room and history: the next file rides the same
   // connection. Only a fresh start (no session) builds a new code.
   const continuing = session.active && !busy;
@@ -593,12 +617,139 @@ function startSending(file: File): void {
   hideResult();
   hideAlert();
 
+  sending = { kind: 'file', file };
   if (continuing && transfer) {
     // Channel is already open; just queue the next file.
-    void sendSelected(file);
+    void sendNext();
     return;
   }
-  void connect('sender', formatCode(words), file);
+  void connect('sender', formatCode(words));
+}
+
+/** Send a text snippet: a tiny synthetic file on the same pipeline. */
+function startSendingText(text: string): void {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  const continuing = session.active && !busy;
+  if (!continuing) reset();
+  if (!session.active) sessionStart('sender');
+  const words = activeWords ?? makeCode();
+  activeWords = words;
+
+  if (!continuing) {
+    codeBox.replaceChildren(
+      ...words.map((word) => {
+        const span = document.createElement('span');
+        span.textContent = word;
+        return span;
+      }),
+    );
+  }
+  picked.replaceChildren();
+  picked.append(document.createTextNode(`متن — ${formatBytes(new Blob([trimmed]).size)}`));
+  codeCard.hidden = false;
+  hideResult();
+  hideAlert();
+
+  sending = { kind: 'text', text: trimmed };
+  if (continuing && transfer) {
+    void sendNext();
+    return;
+  }
+  void connect('sender', formatCode(words));
+}
+
+/** Send a whole folder as one streaming ZIP. */
+function startSendingFolder(files: File[]): void {
+  if (files.length === 0) return;
+  const continuing = session.active && !busy;
+  if (!continuing) reset();
+  if (!session.active) sessionStart('sender');
+  const words = activeWords ?? makeCode();
+  activeWords = words;
+
+  const root = commonRoot(files);
+  const readSize = 1024 * 1024;
+  const entries: FolderEntry[] = files.map((file) => {
+    const path = root ? relativePath(file.webkitRelativePath, root) || file.name : file.name;
+    return {
+      path,
+      size: file.size,
+      modified: new Date(file.lastModified),
+      read: async function* (): AsyncGenerator<Uint8Array> {
+        let offset = 0;
+        while (offset < file.size) {
+          const buffer = await file.slice(offset, offset + readSize).arrayBuffer();
+          const block = new Uint8Array(buffer);
+          offset += block.byteLength;
+          yield block;
+        }
+      },
+    };
+  });
+  const totalSize = entries.reduce((sum, entry) => sum + entry.size, 0);
+  const zipName = `${root || 'folder'}.zip`;
+
+  if (!continuing) {
+    codeBox.replaceChildren(
+      ...words.map((word) => {
+        const span = document.createElement('span');
+        span.textContent = word;
+        return span;
+      }),
+    );
+  }
+  picked.replaceChildren();
+  picked.append(
+    document.createTextNode(`پوشهٔ «${root || 'folder'}» — ${formatInt(entries.length)} فایل — ${formatBytes(totalSize)}`),
+  );
+  codeCard.hidden = false;
+  hideResult();
+  hideAlert();
+
+  sending = { kind: 'folder', entries, zipName, totalSize, count: entries.length };
+  if (continuing && transfer) {
+    void sendNext();
+    return;
+  }
+  void connect('sender', formatCode(words));
+}
+
+/** Longest shared folder prefix of all relative paths, if any. */
+function commonRoot(files: File[]): string {
+  if (files.length === 0) return '';
+  const first = files[0];
+  if (!first) return '';
+  const parts = (first.webkitRelativePath || '').split('/');
+  const root = parts.length > 1 ? (parts[0] ?? '') : '';
+  for (const file of files) {
+    const path = file.webkitRelativePath || '';
+    if (!path.startsWith(`${root}/`)) return '';
+  }
+  return root;
+}
+
+/** Strip "root/" from a webkitRelativePath; keeps inner folders intact. */
+function relativePath(path: string, root: string): string {
+  if (!root || !path.startsWith(`${root}/`)) return path;
+  return path.slice(root.length + 1);
+}
+
+/** Dispatch whatever the sender queued, once the channel can take it. */
+async function sendNext(): Promise<void> {
+  if (!transfer || !sending) return;
+  if (sending.kind === 'file') {
+    beginSending({ name: sending.file.name, size: sending.file.size });
+    await transfer.sendFile(sending.file);
+  } else if (sending.kind === 'text') {
+    const size = new Blob([sending.text]).size;
+    beginSending({ name: 'متن.txt', size });
+    await transfer.sendText(sending.text);
+  } else {
+    beginSending({ name: sending.zipName, size: sending.totalSize });
+    setStatus(`بسته‌بندی ${formatInt(sending.count)} فایل…`, true);
+    await transfer.sendFolder(sending.entries, sending.zipName);
+  }
 }
 
 function startReceiving(input: string): void {
@@ -610,7 +761,7 @@ function startReceiving(input: string): void {
   }
   activeWords = words;
   reset();
-  void connect('receiver', formatCode(words), null);
+  void connect('receiver', formatCode(words));
 }
 
 async function copyCode(): Promise<void> {
@@ -659,8 +810,38 @@ themeToggle.addEventListener('click', () => {
 
 fileInput.addEventListener('change', () => {
   const file = fileInput.files?.[0];
-  if (file) startSending(file);
+  if (file) startSendingFile(file);
   fileInput.value = '';
+});
+
+folderInput.addEventListener('change', () => {
+  const files = [...folderInput.files ?? []];
+  if (files.length > 0) startSendingFolder(files);
+  folderInput.value = '';
+});
+
+textInput.addEventListener('input', () => {
+  sendTextButton.disabled = textInput.value.trim().length === 0;
+});
+
+sendTextButton.addEventListener('click', () => {
+  const text = textInput.value;
+  textInput.value = '';
+  sendTextButton.disabled = true;
+  startSendingText(text);
+});
+
+pasteTextButton.addEventListener('click', async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text.trim()) {
+      textInput.value = text;
+      sendTextButton.disabled = false;
+      textInput.focus();
+    }
+  } catch {
+    setStatus('کلیپ‌بورد در دسترس نیست؛ متن را دستی در کادر بنویس.');
+  }
 });
 
 drop.addEventListener('dragover', (event) => {
@@ -673,9 +854,73 @@ drop.addEventListener('dragleave', () => drop.classList.remove('is-over'));
 drop.addEventListener('drop', (event) => {
   event.preventDefault();
   drop.classList.remove('is-over');
+  // A dropped folder comes through items, not files.
+  const items = [...event.dataTransfer?.items ?? []];
+  const folderItem = items.find((item) => item.webkitGetAsEntry()?.isDirectory);
+  if (folderItem) {
+    const entry = folderItem.webkitGetAsEntry();
+    if (entry && 'createReader' in entry) {
+      const files: File[] = [];
+      const reader = (
+        entry as FileSystemDirectoryEntry & { _collect: unknown }
+      ).createReader();
+      const readBatch = (): void => {
+        reader.readEntries((batch: FileSystemEntry[]) => {
+          if (batch.length === 0) {
+            if (files.length > 0) startSendingFolder(files);
+            return;
+          }
+          for (const item of batch) collectEntry(item as FileSystemFileEntry, '', files, readBatch);
+        });
+      };
+      readBatch();
+      return;
+    }
+  }
   const file = event.dataTransfer?.files?.[0];
-  if (file) startSending(file);
+  if (file) startSendingFile(file);
 });
+
+/** Walk a dropped filesystem entry recursively, collecting real files. */
+function collectEntry(
+  entry: FileSystemEntry,
+  prefix: string,
+  files: File[],
+  done: () => void,
+): void {
+  if (entry.isFile) {
+    (entry as FileSystemFileEntry).file((file) => {
+      Object.defineProperty(file, 'webkitRelativePath', {
+        value: prefix ? `${prefix}/${file.name}` : file.name,
+        configurable: true,
+      });
+      files.push(file);
+      done();
+    });
+    return;
+  }
+  if (entry.isDirectory) {
+    const dir = entry as FileSystemDirectoryEntry;
+    const reader = dir.createReader();
+    const nextPrefix = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const readBatch = (): void => {
+      reader.readEntries((batch: FileSystemEntry[]) => {
+        if (batch.length === 0) {
+          done();
+          return;
+        }
+        let waiting = batch.length;
+        for (const item of batch) {
+          collectEntry(item, nextPrefix, files, () => {
+            waiting -= 1;
+            if (waiting === 0) readBatch();
+          });
+        }
+      });
+    };
+    readBatch();
+  }
+}
 
 window.addEventListener('dragover', (event) => event.preventDefault());
 window.addEventListener('drop', (event) => event.preventDefault());
@@ -683,6 +928,19 @@ window.addEventListener('drop', (event) => event.preventDefault());
 copyButton.addEventListener('click', () => void copyCode());
 cancelButton.addEventListener('click', () => reset());
 sessionClose.addEventListener('click', () => reset());
+copyTextButton.addEventListener('click', async () => {
+  const text = resultText.textContent ?? '';
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    copyTextButton.textContent = 'کپی شد';
+  } catch {
+    copyTextButton.textContent = 'کپی نشد';
+  }
+  window.setTimeout(() => {
+    copyTextButton.textContent = 'کپی متن';
+  }, 1600);
+});
 
 joinForm.addEventListener('submit', (event) => {
   event.preventDefault();

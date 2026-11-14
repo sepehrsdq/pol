@@ -1265,6 +1265,55 @@ input[type='text']:hover {
   font-size: 12.5px;
 }
 
+/* Text snippet: sender box and receiver view. */
+
+.text-box {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.text-box textarea {
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.7;
+  resize: vertical;
+  min-height: 88px;
+  transition: border-color 0.16s ease;
+}
+
+.text-box textarea:hover {
+  border-color: var(--primary);
+}
+
+.text-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.result-text {
+  margin: 0;
+  padding: 12px 14px;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--seg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Steps */
 
 .steps {

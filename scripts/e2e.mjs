@@ -274,13 +274,14 @@ async function submitCode(receiverTab, code) {
   if (!submitted) throw new Error('code submit failed');
 }
 
-async function waitForReceiverResult(receiverTab, timeoutMs = 60_000, previousHash = null) {
+async function waitForReceiverResult(receiverTab, timeoutMs = 60_000, previousHash = null, wantedMime = null) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const snapshot = await receiverTab.evaluate(() => {
       const alert = document.getElementById('alert');
       const result = document.getElementById('result');
       const hash = document.getElementById('result-hash');
+      const text = document.getElementById('result-text');
       const download = document.getElementById('download');
       const alertVisible = alert && !alert.hidden && alert.textContent.trim().length > 0;
       const resultVisible = result && !result.hidden;
@@ -288,6 +289,7 @@ async function waitForReceiverResult(receiverTab, timeoutMs = 60_000, previousHa
         alert: alertVisible ? alert.textContent.trim() : null,
         resultVisible,
         hash: resultVisible && hash ? hash.textContent.trim() : null,
+        text: resultVisible && text && !text.hidden ? text.textContent : null,
         downloadReady: Boolean(download && !download.hidden),
         progress: document.getElementById('progress-size')?.textContent ?? '',
       };
@@ -295,7 +297,13 @@ async function waitForReceiverResult(receiverTab, timeoutMs = 60_000, previousHa
     if (snapshot.alert) throw new Error(`receiver alert: ${snapshot.alert}`);
     // previousHash: the card may still show the last file's result; wait for a new one.
     const fresh = snapshot.hash && (!previousHash || !snapshot.hash.includes(previousHash));
-    if (snapshot.resultVisible && fresh) return snapshot;
+    // wantedMime: text results show the inline view; zip/file results the download.
+    const mimeOk =
+      !wantedMime ||
+      (wantedMime.startsWith('text/')
+        ? typeof snapshot.text === 'string' && snapshot.text.length > 0
+        : snapshot.downloadReady);
+    if (snapshot.resultVisible && fresh && mimeOk) return snapshot;
     await sleep(500);
   }
   throw new Error('receiver never showed a verified result');
@@ -319,6 +327,43 @@ async function waitForSenderAck(senderTab, timeoutMs = 60_000) {
     if (done) return;
   }
   throw new Error('sender never saw the ack');
+}
+
+/** Minimal ZIP store reader: local headers only, method 0 entries. */
+function readZipStore(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const entries = [];
+  let cursor = 0;
+  while (cursor + 30 <= bytes.length) {
+    if (view.getUint32(cursor, true) !== 0x04034b50) break;
+    const flags = view.getUint16(cursor + 6, true);
+    const method = view.getUint16(cursor + 8, true);
+    const size = view.getUint32(cursor + 18, true);
+    const nameLen = view.getUint16(cursor + 26, true);
+    const extraLen = view.getUint16(cursor + 28, true);
+    const nameStart = cursor + 30;
+    const name = new TextDecoder().decode(bytes.subarray(nameStart, nameStart + nameLen));
+    const dataStart = nameStart + nameLen + extraLen;
+    if (method !== 0) throw new Error(`zip entry "${name}" is not stored (method ${method})`);
+    // With bit-3 data descriptors, some writers leave sizes zero in the local
+    // header; fall back to scanning for the next signature when needed.
+    let dataEnd = dataStart + size;
+    if (size === 0 && (flags & 0x8) !== 0) {
+      // Search forward for the next local header or central directory.
+      let probe = dataStart;
+      while (probe + 4 <= bytes.length) {
+        const sig = view.getUint32(probe, true);
+        if (sig === 0x04034b50 || sig === 0x02014b50 || sig === 0x06054b50) break;
+        probe += 1;
+      }
+      dataEnd = probe - 12; // strip the trailing data descriptor
+    }
+    entries.push({ name, data: bytes.slice(dataStart, dataEnd) });
+    // Every entry is followed by a 12-byte data descriptor (our writer always
+    // emits one), except where the central directory already began.
+    cursor = dataEnd + 12;
+  }
+  return entries;
 }
 
 async function main() {
@@ -419,7 +464,104 @@ async function main() {
       return;
     }
     log(`session kept across ${FILE_SIZES.length} files, code "${roomCode}", promised ${expectedTotal} bytes`);
-    log('E2E PASS (three files, one session, totals exact)');
+
+    // --- text snippet: typed into the textarea, sent with the button ---
+    const secret = `pol secret ${Date.now()}`;
+    const textSent = await senderTab.evaluate((payload) => {
+      const input = document.getElementById('text-input');
+      const button = document.getElementById('send-text');
+      input.value = payload;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      if (button.disabled) return false;
+      button.click();
+      return true;
+    }, secret);
+    if (!textSent) {
+      fail('send-text button never enabled or click failed');
+      return;
+    }
+    log(`text queued: "${secret.slice(0, 18)}…"`);
+
+    const textResult = await waitForReceiverResult(receiverTab, 60_000, previousHash, 'text/plain');
+    const textShown = textResult.text ?? '';
+    if (textShown !== secret) {
+      fail(`text mismatch\n  expected ${secret}\n  received ${textShown}`);
+      return;
+    }
+    log('text verified on the receiver, inline view shown');
+    previousHash = textResult.hash;
+
+    // --- folder: build virtual files with webkitRelativePath, send as ZIP ---
+    const folderName = `pol-folder-${Date.now()}`;
+    const folderFiles = await senderTab.evaluate((root) => {
+      const input = document.getElementById('folder');
+      const transfer = new DataTransfer();
+      const made = [];
+      const content = (size, seed) => {
+        const bytes = new Uint8Array(size);
+        for (let i = 0; i < size; i += 1) bytes[i] = (seed + i * 31) & 0xff;
+        return bytes;
+      };
+      const specs = [
+        { name: `${root}/readme.txt`, size: 40, seed: 1 },
+        { name: `${root}/img/blob-a.bin`, size: 120_000, seed: 7 },
+        { name: `${root}/img/blob-b.bin`, size: 45_000, seed: 13 },
+      ];
+      for (const spec of specs) {
+        const file = new File([content(spec.size, spec.seed)], spec.name.split('/').pop(), {
+          type: 'application/octet-stream',
+        });
+        Object.defineProperty(file, 'webkitRelativePath', { value: spec.name, configurable: true });
+        transfer.items.add(file);
+        made.push({ path: spec.name, size: spec.size, content: content(spec.size, spec.seed) });
+      }
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return made.map((m) => ({ path: m.path, size: m.size, content: [...m.content] }));
+    }, folderName);
+    log(`folder queued: ${folderFiles.length} files as "${folderName}.zip"`);
+
+    const zipResult = await waitForReceiverResult(receiverTab, 90_000, previousHash, 'application/zip');
+    const zipHash = (zipResult.hash.match(/[0-9a-f]{64}/) ?? [])[0];
+    if (!zipHash) {
+      fail('zip hash unreadable');
+      return;
+    }
+    // Pull the ZIP back out of the page and parse its store entries in Node.
+    const zipBytes = new Uint8Array(await receiverTab.evaluate(async () => {
+      const link = document.getElementById('download');
+      const response = await fetch(link.href);
+      return [...new Uint8Array(await response.arrayBuffer())];
+    }));
+    const entries = readZipStore(zipBytes);
+    let zipOk = true;
+    for (const sent of folderFiles) {
+      const innerName = sent.path.split('/').slice(1).join('/');
+      const entry = entries.find((e) => e.name === innerName);
+      if (!entry) {
+        fail(`zip missing entry "${innerName}" (got: ${entries.map((e) => e.name).join(', ')})`);
+        zipOk = false;
+        break;
+      }
+      const receivedHash = createHash('sha256').update(entry.data).digest('hex');
+      const expectedHash = createHash('sha256').update(new Uint8Array(sent.content)).digest('hex');
+      if (receivedHash !== expectedHash || entry.data.length !== sent.size) {
+        fail(`zip entry "${innerName}" content mismatch`);
+        zipOk = false;
+        break;
+      }
+    }
+    if (!zipOk) return;
+    log(`zip parsed back: ${entries.length} entries, all contents byte-exact, archive hash ${zipHash.slice(0, 12)}…`);
+
+    // Final count: three files + text + zip = five session entries.
+    const count = await receiverTab.evaluate(() => document.querySelectorAll('#session-list li').length);
+    if (count !== FILE_SIZES.length + 2) {
+      fail(`final session count wrong: ${count}, expected ${FILE_SIZES.length + 2}`);
+      return;
+    }
+    log(`session list holds ${count} entries — files, text and folder all in one session`);
+    log('E2E PASS (files + text + folder ZIP, one session)');
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   } finally {
