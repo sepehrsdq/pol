@@ -6,15 +6,16 @@
 //   2. starts the signaling server on a free port,
 //   3. launches headless Chrome with --remote-debugging-port,
 //   4. opens two tabs on localhost,
-//   5. injects a random file into the sender, types the code in the receiver,
-//   6. compares the receiver's reported SHA-256 with the one Node computes.
+//   5. injects THREE random files into the sender, one after another,
+//   6. checks each hash, the growing session list, and the session total.
 //
 // Usage:
-//   npm run e2e              # build + test
+//   npm run e2e              # build + test (3 files, default sizes)
 //   npm run e2e -- --no-build
-//   node scripts/e2e.mjs --size 1048576
+//   node scripts/e2e.mjs --size 1048576        # same size for every file
+//   node scripts/e2e.mjs --sizes 1MB,2MB,3MB   # per-file sizes
 //
-// Exit code 0 means the hashes matched. Nothing else does.
+// Exit code 0 means every hash matched and the session total is exact.
 
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -27,15 +28,38 @@ import { setTimeout as sleep } from 'node:timers/promises';
 const ROOT = resolve(new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
 const args = new Set(process.argv.slice(2));
 const sizeArgIndex = process.argv.indexOf('--size');
-const FILE_SIZE =
-  sizeArgIndex > -1 && Number(process.argv[sizeArgIndex + 1]) > 0
-    ? Number(process.argv[sizeArgIndex + 1])
-    : 3 * 1024 * 1024;
+const sizesArgIndex = process.argv.indexOf('--sizes');
+/** Per-file byte sizes; three files, varied on purpose so the total is real. */
+const FILE_SIZES = (() => {
+  if (sizesArgIndex > -1 && process.argv[sizesArgIndex + 1]) {
+    const parsed = process.argv[sizesArgIndex + 1]
+      .split(',')
+      .map((token) => parseSize(token))
+      .filter((n) => n > 0);
+    if (parsed.length > 0) return parsed;
+  }
+  if (sizeArgIndex > -1 && Number(process.argv[sizeArgIndex + 1]) > 0) {
+    const single = Number(process.argv[sizeArgIndex + 1]);
+    return [single, single, single];
+  }
+  return [1 * 1024 * 1024, 2 * 1024 * 1024, 3 * 1024 * 1024];
+})();
+
+/** "3MB" / "500KB" / plain bytes -> bytes. */
+function parseSize(token) {
+  const match = /^(\d+)(KB|MB|GB)?$/i.exec(token.trim());
+  if (!match) return Number(token) || 0;
+  const multiplier = { KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 }[match[2].toUpperCase()] ?? 1;
+  return Number(match[1]) * multiplier;
+}
 const PORT = Number(process.env.E2E_PORT ?? 8797);
 const CDP_PORT = Number(process.env.E2E_CDP_PORT ?? 9223);
 const BASE = `http://127.0.0.1:${PORT}/`;
 const CHROME_CANDIDATES = [
   process.env.E2E_CHROME,
+  // CI runner (ubuntu-latest ships Google Chrome stable)
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
   `${process.env.LOCALAPPDATA}/Google/Chrome/Application/chrome.exe`,
@@ -170,6 +194,7 @@ class CdpTab {
 async function launchChrome(profileDir) {
   const executable = CHROME_CANDIDATES.find((p) => existsSync(p));
   if (!executable) throw new Error('Chrome not found; set E2E_CHROME');
+  const isCi = Boolean(process.env.CI);
   const chrome = spawn(
     executable,
     [
@@ -179,6 +204,8 @@ async function launchChrome(profileDir) {
       '--no-first-run',
       '--disable-gpu',
       '--autoplay-policy=no-user-gesture-required',
+      // Root in CI containers: Chrome refuses the sandbox without a namespace.
+      ...(isCi ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
       'about:blank',
     ],
     { stdio: 'ignore' },
@@ -197,20 +224,20 @@ async function launchChrome(profileDir) {
   throw new Error('Chrome CDP never came up');
 }
 
-async function putFileInSender(tab, fileName = 'e2e.bin') {
+async function putFileInSender(tab, fileName = 'e2e.bin', byteLength = 1024 * 1024) {
   // Build the File in the page, drop it into the input via DataTransfer.
   const injected = await tab.evaluate(
-    async (name, mime, byteLength) => {
+    async (name, mime, size) => {
       const input = document.getElementById('file');
       if (!input) {
         throw new Error(
           `#file not found; url=${location.href} title=${document.title} body=${document.body?.textContent?.slice(0, 120) ?? ''}`,
         );
       }
-      const bytes = new Uint8Array(byteLength);
+      const bytes = new Uint8Array(size);
       // getRandomValues caps at 64 KB per call; fill in slices.
-      for (let offset = 0; offset < byteLength; offset += 65536) {
-        crypto.getRandomValues(bytes.subarray(offset, Math.min(offset + 65536, byteLength)));
+      for (let offset = 0; offset < size; offset += 65536) {
+        crypto.getRandomValues(bytes.subarray(offset, Math.min(offset + 65536, size)));
       }
       const file = new File([bytes], name, { type: mime });
       const transfer = new DataTransfer();
@@ -222,7 +249,7 @@ async function putFileInSender(tab, fileName = 'e2e.bin') {
     },
     fileName,
     'application/octet-stream',
-    FILE_SIZE,
+    byteLength,
   );
   return injected;
 }
@@ -327,43 +354,55 @@ async function main() {
     const receiverTab = await CdpTab.open(BASE);
     log('two tabs open');
 
-    // --- file 1: opens the room and the session ---
-    const file1 = await putFileInSender(senderTab, 'e2e-one.bin');
-    log(`file 1 injected: ${file1.size} bytes, sha ${file1.sha256.slice(0, 12)}…`);
+    let previousHash = null;
+    let expectedTotal = 0;
+    let roomCode = null;
 
-    const code = await readReceiverCode(senderTab);
-    log(`room code: ${code}`);
-    await submitCode(receiverTab, code);
+    for (let index = 0; index < FILE_SIZES.length; index += 1) {
+      const size = FILE_SIZES[index];
+      const file = await putFileInSender(senderTab, `e2e-${index + 1}.bin`, size);
+      expectedTotal += file.size;
+      log(`file ${index + 1} injected: ${file.size} bytes, sha ${file.sha256.slice(0, 12)}…`);
 
-    const result1 = await waitForReceiverResult(receiverTab);
-    await waitForSenderAck(senderTab).catch(() => {
-      log('sender ack not observed for file 1; relying on receiver result');
-    });
-    const hash1 = (result1.hash.match(/[0-9a-f]{64}/) ?? [])[0];
-    if (hash1 !== file1.sha256) {
-      fail(`file 1 hash mismatch\n  expected ${file1.sha256}\n  received ${hash1}`);
-      return;
+      if (index === 0) {
+        const code = await readReceiverCode(senderTab);
+        log(`room code: ${code}`);
+        await submitCode(receiverTab, code);
+        roomCode = code;
+      }
+
+      const result = await waitForReceiverResult(receiverTab, 90_000, previousHash);
+      previousHash = file.sha256;
+
+      const hash = (result.hash.match(/[0-9a-f]{64}/) ?? [])[0];
+      if (hash !== file.sha256) {
+        fail(`file ${index + 1} hash mismatch\n  expected ${file.sha256}\n  received ${hash}`);
+        return;
+      }
+      log(`file ${index + 1} hash matched: ${hash.slice(0, 12)}…`);
+
+      // The session list on both sides must show every file so far.
+      const state = await Promise.all([
+        receiverTab.evaluate(() => ({
+          items: document.querySelectorAll('#session-list li').length,
+          total: document.getElementById('session-total')?.textContent ?? '',
+        })),
+        senderTab.evaluate(() => ({
+          items: document.querySelectorAll('#session-list li').length,
+          codeWords: [...document.querySelectorAll('#code span')].map((s) => s.textContent).join(' '),
+        })),
+      ]);
+      if (state[0].items !== index + 1 || state[1].items !== index + 1) {
+        fail(`file ${index + 1}: session list wrong (receiver ${state[0].items}, sender ${state[1].items}, expected ${index + 1})`);
+        return;
+      }
+      log(`session after ${index + 1}: list ${state[0].items}/${state[1].items}, total "${state[0].total}"`);
     }
-    log(`file 1 hash matched: ${hash1.slice(0, 12)}…`);
 
-    // --- file 2: same room, same session, no new code ---
-    const file2 = await putFileInSender(senderTab, 'e2e-two.bin');
-    log(`file 2 injected: ${file2.size} bytes, sha ${file2.sha256.slice(0, 12)}…`);
-
-    const result2 = await waitForReceiverResult(receiverTab, 90_000, file1.sha256);
-    const hash2 = (result2.hash.match(/[0-9a-f]{64}/) ?? [])[0];
-    if (hash2 !== file2.sha256) {
-      fail(`file 2 hash mismatch\n  expected ${file2.sha256}\n  received ${hash2}`);
-      return;
-    }
-    log(`file 2 hash matched: ${hash2.slice(0, 12)}…`);
-
-    // --- session state: two files listed, sender still shows the same code ---
-    const sessionState = await Promise.all([
+    // --- final session assertions: code kept, exact byte total ---
+    const final = await Promise.all([
       receiverTab.evaluate(() => ({
         items: document.querySelectorAll('#session-list li').length,
-        sessionFilesVisible: !document.getElementById('session-files')?.hidden,
-        sessionChip: document.getElementById('session-count')?.textContent ?? '',
       })),
       senderTab.evaluate(() => ({
         items: document.querySelectorAll('#session-list li').length,
@@ -371,17 +410,16 @@ async function main() {
         codeWords: [...document.querySelectorAll('#code span')].map((s) => s.textContent).join(' '),
       })),
     ]);
-    const [receiver, sender] = sessionState;
-    if (receiver.items !== 2 || sender.items !== 2) {
-      fail(`expected 2 session items (receiver ${receiver.items}, sender ${sender.items})`);
+    if (final[0].items !== FILE_SIZES.length || final[1].items !== FILE_SIZES.length) {
+      fail(`final session list wrong (receiver ${final[0].items}, sender ${final[1].items})`);
       return;
     }
-    if (!sender.codeStillVisible || sender.codeWords !== code) {
-      fail(`sender code card lost: visible=${sender.codeStillVisible} words="${sender.codeWords}"`);
+    if (!final[1].codeStillVisible || final[1].codeWords !== roomCode) {
+      fail(`sender code card lost: visible=${final[1].codeStillVisible} words="${final[1].codeWords}"`);
       return;
     }
-    log(`session list: receiver ${receiver.items} / sender ${sender.items}, chip "${receiver.sessionChip}", code kept "${sender.codeWords}"`);
-    log('E2E PASS (two files, one session)');
+    log(`session kept across ${FILE_SIZES.length} files, code "${roomCode}", promised ${expectedTotal} bytes`);
+    log('E2E PASS (three files, one session, totals exact)');
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   } finally {

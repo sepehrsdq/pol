@@ -18,6 +18,18 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run the real-Chrome transfer test (three files, one session)
+        run: npm run e2e
+
   image:
     runs-on: ubuntu-latest
     steps:
