@@ -59,9 +59,10 @@ TURN_PASSWORD=...
 The API key never reaches the browser: the server fetches short-lived credentials, caches them for 10 minutes, and hands those to clients.
 
 ```bash
-npm test        # 82 tests: word codes, sizes, SHA-256, CRC-32, ZIP, QR, OPFS store, ICE, Metered, rooms
+npm test        # 90 tests: word codes, sizes, SHA-256, CRC-32, ZIP, QR, OPFS store, ICE, Metered, rooms, tuning
 npm run e2e     # real Chrome: 3 files + text + folder ZIP + two interrupted transfers, one session
 npm run build   # typecheck + production build
+npm run bench   # real Chrome: throughput of the data channel over several chunk sizes and watermarks
 ```
 
 ## How it works
@@ -74,6 +75,8 @@ server/signal.mjs   rooms and SDP/ICE relay (~150 lines)
 ```
 
 The sender creates a data channel and offers; the receiver answers. Files are sliced into 64 KB chunks with backpressure at 4 MB buffered, then verified with SHA-256. A room code is only a room identifier — encryption comes from DTLS, and a key derived from the code (SPAKE2) is planned for v0.7.
+
+Chunk size and watermarks are not guesses: `npm run bench` measures them in a real Chrome, and on the machine measured here (an 8-thread laptop at 1.4 GHz) the data channel is the bottleneck — the sender spends 70–85% of the file window waiting for it to accept more, and every chunk size and watermark tested lands within run-to-run noise of 64 KB (see `docs/benchmark.md`).
 
 When the receiver supports the origin private file system (every current Chromium and Firefox), bytes are written to disk as they arrive instead of piling up in the tab. The receiver answers each file announcement with a `ready` carrying its byte offset, so a resumed file continues where it stopped while the sender still hashes the whole file from the first byte.
 

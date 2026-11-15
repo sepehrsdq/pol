@@ -9,11 +9,22 @@ import {
 } from '../lib/receive-store';
 import { buildZip, zipSize, type ZipEntry } from '../lib/zip';
 import { trace } from '../lib/trace';
+import { DEFAULT_TUNING, isAboveHighWater, resolveTuning, type TransferTuning } from '../lib/tuning';
 
-const CHUNK_SIZE = 64 * 1024;
+/** Mutable so a benchmark can measure several configurations in one build. */
+let tuning: TransferTuning = { ...DEFAULT_TUNING };
+
+/** Change the sender tuning; impossible values are clamped, never thrown. */
+export function setTransferTuning(patch: Partial<TransferTuning>): TransferTuning {
+  tuning = resolveTuning(tuning, patch);
+  return { ...tuning };
+}
+
+export function getTransferTuning(): TransferTuning {
+  return { ...tuning };
+}
+
 const READ_SIZE = 1024 * 1024;
-const HIGH_WATER = 4 * 1024 * 1024;
-const LOW_WATER = 1 * 1024 * 1024;
 /**
  * Relay traffic (cross-network transfers) is capped by the TURN plan.
  * Direct transfers on the same network have no size limit.
@@ -75,6 +86,20 @@ export interface TransferDiagnostics {
   iceErrors: string[];
 }
 
+/**
+ * Where a transfer spent its time, in milliseconds. The benchmark prints it;
+ * the app never does. `sendMs` is the cost of `send()` itself, `drainMs` the
+ * time spent waiting for the channel to accept more, `readMs` the file reads.
+ */
+export interface TransferStats {
+  chunks: number;
+  sendMs: number;
+  drainMs: number;
+  readMs: number;
+  hashSendMs: number;
+  hashRecvMs: number;
+}
+
 export interface TransferEvents {
   onState: (state: 'connecting' | 'open' | 'closed') => void;
   onMeta: (meta: FileMeta) => void;
@@ -103,6 +128,16 @@ function waitDrain(channel: RTCDataChannel): Promise<void> {
     channel.addEventListener('bufferedamountlow', handleLow);
     channel.addEventListener('close', handleClose);
   });
+}
+
+/**
+ * Hand `send()` a view onto bytes that are already in memory. The cast is
+ * only for the type system: a generator that built its array from an
+ * `ArrayBuffer` never holds a shared one, and `send()` copies on the spot.
+ */
+function sendSlice(channel: RTCDataChannel, bytes: Uint8Array, start: number, end: number): void {
+  const buffer = bytes.buffer as ArrayBuffer;
+  channel.send(new Uint8Array(buffer, bytes.byteOffset + start, end - start));
 }
 
 function waitOpen(channel: RTCDataChannel): Promise<RTCDataChannel> {
@@ -158,6 +193,19 @@ export class Transfer {
   private resumed = false;
   private parked = false;
   private receivedBytes = 0;
+
+  /**
+   * Time spent in each part of the send loop, for the benchmark's report.
+   * Two `performance.now()` calls per chunk, so it is always collected.
+   */
+  private readonly stats: TransferStats = {
+    chunks: 0,
+    sendMs: 0,
+    drainMs: 0,
+    readMs: 0,
+    hashSendMs: 0,
+    hashRecvMs: 0,
+  };
 
   /** Sender side: offset a resuming receiver asked for, resolved once. */
   private readyOffset: number | null = null;
@@ -314,7 +362,7 @@ export class Transfer {
     trace('channel attached', channel.label);
 
     channel.addEventListener('open', () => {
-      channel.bufferedAmountLowThreshold = LOW_WATER;
+      channel.bufferedAmountLowThreshold = tuning.lowWater;
       this.opened = true;
       window.clearTimeout(this.giveUpTimer);
       window.clearTimeout(this.restartTimer);
@@ -430,24 +478,45 @@ export class Transfer {
     trace('stream start', offset, 'of', size);
     const hash = new Sha256();
     let sent = Math.min(offset, size);
+    // Freeze the tuning for this stream: a benchmark may change it between
+    // transfers, and half an old configuration would be worse than either.
+    const active = tuning;
+    // The low watermark is what makes `bufferedamountlow` fire.
+    channel.bufferedAmountLowThreshold = active.lowWater;
+    this.resetStats();
     try {
       let position = 0;
-      for await (const block of source) {
+      // The generator is driven by hand: measuring how long a read blocks is
+      // the only way to tell "the disk is slow" from "the channel is slow".
+      const blocks = source[Symbol.asyncIterator]();
+      for (;;) {
+        const readStarted = performance.now();
+        const step = await blocks.next();
+        this.stats.readMs += performance.now() - readStarted;
+        if (step.done) break;
+        const block = step.value;
+        const hashStarted = performance.now();
         hash.update(block);
+        this.stats.hashSendMs += performance.now() - hashStarted;
         const blockStart = position;
         position += block.byteLength;
         // Skip whatever the receiver already has; keep hashing regardless.
         const from = Math.max(0, offset - blockStart);
         if (from >= block.byteLength) continue;
 
-        for (let inner = from; inner < block.byteLength; inner += CHUNK_SIZE) {
-          if (channel.bufferedAmount > HIGH_WATER) await waitDrain(channel);
-          const end = Math.min(inner + CHUNK_SIZE, block.byteLength);
-          const slice = new Uint8Array(block.buffer, block.byteOffset + inner, end - inner);
-          const out = new Uint8Array(slice.byteLength);
-          out.set(slice);
-          channel.send(out);
-          sent += out.byteLength;
+        for (let inner = from; inner < block.byteLength; inner += active.chunkSize) {
+          if (isAboveHighWater(active, channel.bufferedAmount)) {
+            const drainStarted = performance.now();
+            await waitDrain(channel);
+            this.stats.drainMs += performance.now() - drainStarted;
+          }
+          const end = Math.min(inner + active.chunkSize, block.byteLength);
+          const sendStarted = performance.now();
+          // A view on the buffer the reader just filled, not a copy.
+          sendSlice(channel, block, inner, end);
+          this.stats.sendMs += performance.now() - sendStarted;
+          this.stats.chunks += 1;
+          sent += end - inner;
           this.events.onProgress(sent, size);
         }
       }
@@ -612,6 +681,7 @@ export class Transfer {
       this.mime = typeof message.mime === 'string' ? message.mime : 'application/octet-stream';
       const modified = typeof message.modified === 'number' ? message.modified : null;
       const name = String(message.name ?? 'file');
+      this.resetStats();
       this.beginReceive({ name, size: this.expectedSize, mime: this.mime, modified });
       this.events.onMeta({ name, size: this.expectedSize, mime: this.mime, hash: this.expectedHash });
       return;
@@ -740,8 +810,25 @@ export class Transfer {
     const bytes = new Uint8Array(data);
     this.receivedBytes += bytes.byteLength;
     this.enqueueWrite(bytes);
+    const started = performance.now();
     this.receiveHash?.update(bytes);
+    this.stats.hashRecvMs += performance.now() - started;
+    this.stats.chunks += 1;
     this.events.onProgress(this.receivedBytes, this.expectedSize);
+  }
+
+  /** Where this transfer spent its time; the benchmark reads it. */
+  timings(): TransferStats {
+    return { ...this.stats };
+  }
+
+  private resetStats(): void {
+    this.stats.chunks = 0;
+    this.stats.sendMs = 0;
+    this.stats.drainMs = 0;
+    this.stats.readMs = 0;
+    this.stats.hashSendMs = 0;
+    this.stats.hashRecvMs = 0;
   }
 
   /**

@@ -14,7 +14,16 @@ import { trace } from './lib/trace';
 import { formatCode, makeCode, parseCode } from './lib/words';
 import { loadIceServers } from './net/ice';
 import { defaultSignalUrl, SignalClient, type ServerMessage } from './net/signal';
-import { Transfer, type FileMeta, type FolderEntry, type SignalPayload, type TransferDiagnostics, type TransferRole } from './net/transfer';
+import {
+  getTransferTuning,
+  setTransferTuning,
+  Transfer,
+  type FolderEntry,
+  type FileMeta,
+  type SignalPayload,
+  type TransferDiagnostics,
+  type TransferRole,
+} from './net/transfer';
 
 function el<T extends Element>(id: string): T {
   const node = document.getElementById(id);
@@ -118,6 +127,11 @@ let countedSendKey: string | null = null;
 let countedReceiveKey: string | null = null;
 /** What the last finished receive actually produced (debug/test hook). */
 let lastVerified: { size: number; expected: number; ok: boolean } | null = null;
+/** Receiver-side window: first byte in → file verified (debug/test hook). */
+let receiveStartedAt = 0;
+let receiveEndedAt = 0;
+/** Last progress event: separates streaming from finishing the file. */
+let receiveLastProgressAt = 0;
 /** Automatic reconnects after a dropped channel, so a loop cannot spin. */
 let reconnectAttempts = 0;
 /** The e2e reload test turns this off to simulate a user who walks away. */
@@ -388,7 +402,7 @@ function reset(): void {
   codeCard.hidden = true;
 }
 
-function trackProgress(done: number, total: number): void {
+function trackProgress(done: number, total: number): boolean {
   const now = performance.now();
   if (sampleTime === 0) {
     sampleTime = now;
@@ -401,13 +415,14 @@ function trackProgress(done: number, total: number): void {
 
   // Chunks arrive many times per frame; repaint at most ~10 times a second.
   const complete = total > 0 && done >= total;
-  if (!complete && now - lastPaint < 90) return;
+  if (!complete && now - lastPaint < 90) return false;
   lastPaint = now;
 
   const ratio = total > 0 ? done / total : 0;
   setBar(ratio);
   progressSize.textContent = total > 0 ? `${formatBytes(done)} از ${formatBytes(total)}` : formatBytes(done);
   progressSpeed.textContent = speed > 0 ? formatSpeed(speed) : '';
+  return true;
 }
 
 function describeError(code: string, detail?: TransferDiagnostics): string {
@@ -462,6 +477,11 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
     },
     onMeta: (meta: FileMeta) => {
       if (!live()) return;
+      if (role === 'receiver') {
+        receiveStartedAt = 0;
+        receiveEndedAt = 0;
+        receiveLastProgressAt = 0;
+      }
       progressCard.hidden = false;
       resetProgress();
       currentFileDone = 0;
@@ -484,11 +504,17 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
     },
     onProgress: (done, total) => {
       if (!live()) return;
-      bridge.classList.add('is-active');
-      trackProgress(done, total);
-      // The session total is completed files plus the one in flight, so a
-      // resumed file is neither lost nor counted twice.
+      // First byte to final file: the benchmark's window, setup excluded.
+      if (role === 'receiver' && receiveStartedAt === 0 && done > 0) {
+        receiveStartedAt = performance.now();
+      }
+      if (role === 'receiver') receiveLastProgressAt = performance.now();
+      // Counting bytes is cheap; laying out the page is not. The tracker owns
+      // the paint interval, so the session strip rides along with it instead
+      // of rewriting the DOM for every 64 KB chunk.
       currentFileDone = done;
+      if (!trackProgress(done, total)) return;
+      bridge.classList.add('is-active');
       if (session.active) {
         renderSessionMeta();
         renderSessionBar();
@@ -497,6 +523,7 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
     },
     onVerified: ({ checked, ok, received, blob }) => {
       if (!live()) return;
+      if (role === 'receiver') receiveEndedAt = performance.now();
       lastVerified = { size: blob?.size ?? 0, expected: lastFileSize, ok: checked && ok };
       busy = false;
       countedReceiveKey = null;
@@ -1234,9 +1261,38 @@ if (new URLSearchParams(location.search).has('debug')) {
     sessionBytes: () => session.bytes + currentFileDone,
     /** Size/result of the last finished receive. */
     lastReceive: () => lastVerified,
+    /** Sender tuning of this page, for the benchmark. */
+    tuning: () => getTransferTuning(),
+    setTuning: (patch: Record<string, number>) => setTransferTuning(patch),
+    /** Receiver window of the last file: first byte in → verified. */
+    timeline: () => ({
+      startedAt: receiveStartedAt,
+      endedAt: receiveEndedAt,
+      lastProgressAt: receiveLastProgressAt,
+      bytes: lastVerified?.size ?? 0,
+      ok: lastVerified?.ok ?? false,
+    }),
+    /** Where the last transfer spent its time, in ms. */
+    stats: () => transfer?.timings() ?? null,
     /** Stop the automatic rejoin so a reload can be tested as a clean start. */
     stopRetries: () => {
       autoRetry = false;
+    },
+    /**
+     * Drop the last received file: blob URL, result card and its OPFS entry.
+     * The benchmark uses this between runs so one run does not leave 128 MB
+     * behind for the next one to pay for.
+     */
+    clearReceived: async () => {
+      if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+      downloadUrl = null;
+      download.hidden = true;
+      result.hidden = true;
+      lastVerified = null;
+      receiveStartedAt = 0;
+      receiveEndedAt = 0;
+      receiveLastProgressAt = 0;
+      await cleanupStaleFiles();
     },
   };
 }
