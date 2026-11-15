@@ -1,7 +1,7 @@
 {
   "name": "pol",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.6.2",
   "type": "module",
   "description": "Browser-to-browser file transfer. Nothing is uploaded.",
   "scripts": {

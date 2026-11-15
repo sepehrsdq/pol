@@ -8,6 +8,7 @@ import {
   shortenName,
 } from './lib/format';
 import { setupReveal } from './lib/reveal';
+import { APP_VERSION } from './lib/version';
 import { cleanupStaleFiles, hasOpfs } from './lib/receive-store';
 import { encodeQr, type QrMatrix } from './lib/qr';
 import { trace } from './lib/trace';
@@ -87,6 +88,140 @@ const download = el<HTMLAnchorElement>('download');
 const resultText = el<HTMLPreElement>('result-text');
 const copyTextButton = el<HTMLButtonElement>('copy-text');
 const themeToggle = el<HTMLButtonElement>('theme-toggle');
+
+/** Version shown beside the maker's name; mirrors package.json. */
+const versionBadge = document.getElementById('app-version');
+if (versionBadge) versionBadge.textContent = `v${APP_VERSION}`;
+
+const reducedMotion = (): boolean =>
+  window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/**
+ * One scroll listener drives both the reading hairline and the header: while
+ * the cover is under it the bar is transparent with light text, and it turns
+ * into the paper bar the moment the page moves. Everything is a class and a
+ * single rAF paint.
+ */
+function setupChrome(): void {
+  const line = document.getElementById('topline');
+  const header = document.getElementById('top');
+  let queued = false;
+
+  const paint = (): void => {
+    queued = false;
+    const room = document.documentElement.scrollHeight - window.innerHeight;
+    const ratio = room > 0 ? Math.min(1, Math.max(0, window.scrollY / room)) : 0;
+    line?.style.setProperty('--progress', ratio.toFixed(4));
+    header?.classList.toggle('is-scrolled', window.scrollY > 24);
+  };
+
+  const schedule = (): void => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(paint);
+  };
+
+  window.addEventListener('scroll', schedule, { passive: true });
+  window.addEventListener('resize', schedule);
+  paint();
+}
+
+/**
+ * A soft light that follows the pointer across the headline. Fine pointers
+ * only, off for reduced motion, and it never touches layout.
+ */
+function setupHeroSpotlight(): void {
+  const copy = document.querySelector<HTMLElement>('.hero-copy');
+  if (!copy) return;
+  if (!window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+  if (reducedMotion()) return;
+
+  let queued = false;
+  let x = 50;
+  let y = 40;
+  const paint = (): void => {
+    queued = false;
+    copy.style.setProperty('--spot-x', `${x.toFixed(1)}%`);
+    copy.style.setProperty('--spot-y', `${y.toFixed(1)}%`);
+  };
+  copy.addEventListener('pointermove', (event) => {
+    const rect = copy.getBoundingClientRect();
+    x = ((event.clientX - rect.left) / rect.width) * 100;
+    y = ((event.clientY - rect.top) / rect.height) * 100;
+    copy.classList.add('is-spot');
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(paint);
+  });
+  copy.addEventListener('pointerleave', () => copy.classList.remove('is-spot'));
+}
+
+/**
+ * The diagram leans a few degrees towards the pointer. Small on purpose: the
+ * numbers inside have to stay readable. Touch and reduced motion get nothing.
+ */
+function setupArtTilt(): void {
+  if (!window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+  if (reducedMotion()) return;
+
+  const limit = 5.5;
+  let frame = 0;
+  let tiltX = 0;
+  let tiltY = 0;
+
+  const paint = (): void => {
+    frame = 0;
+    bridge.style.transform = `perspective(1200px) rotateX(${tiltX.toFixed(2)}deg) rotateY(${tiltY.toFixed(2)}deg)`;
+  };
+
+  bridge.addEventListener('pointermove', (event) => {
+    const rect = bridge.getBoundingClientRect();
+    const dx = (event.clientX - rect.left) / rect.width - 0.5;
+    const dy = (event.clientY - rect.top) / rect.height - 0.5;
+    tiltX = -dy * limit;
+    tiltY = dx * limit * 1.6;
+    bridge.classList.add('is-tilting');
+    if (frame) return;
+    frame = requestAnimationFrame(paint);
+  });
+
+  bridge.addEventListener('pointerleave', () => {
+    bridge.classList.remove('is-tilting');
+    bridge.style.transform = '';
+  });
+}
+
+/** "Send a file" is the picker, not a scroll: one click, one dialog. */
+function setupStartButton(): void {
+  const start = document.getElementById('start');
+  const section = document.getElementById('transfer');
+  if (!start || !section) return;
+
+  start.addEventListener('click', () => {
+    if (mode !== 'send') setMode('send');
+    section.scrollIntoView({ block: 'center' });
+    if (!busy) fileInput.click();
+  });
+}
+
+/**
+ * SMIL keeps its own clock, so reduced motion has to stop it explicitly. The
+ * packets are hidden by CSS; this stops the timeline from running for nothing.
+ */
+function setupStillArt(): void {
+  if (!reducedMotion()) return;
+  for (const svg of document.querySelectorAll('svg')) {
+    const timeline = svg as SVGSVGElement;
+    if (typeof timeline.pauseAnimations === 'function') timeline.pauseAnimations();
+  }
+}
+
+setupChrome();
+setupHeroSpotlight();
+setupArtTilt();
+setupStartButton();
+setupStillArt();
+
 
 interface SessionFile {
   name: string;
