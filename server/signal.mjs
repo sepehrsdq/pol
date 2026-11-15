@@ -128,16 +128,30 @@ function serveClient(request, response) {
   }
 
   const fallback = resolve(DIST_DIR, 'index.html');
-  const filePath =
-    existsSync(candidate) && statSync(candidate).isFile() ? candidate : fallback;
+  const present = existsSync(candidate) && statSync(candidate).isFile();
+  if (present) {
+    sendFile(request, response, candidate);
+    return;
+  }
 
-  if (!existsSync(filePath)) {
+  // A hashed asset that is not on disk is gone for good: the page holding its
+  // old HTML is asking for bytes that a deploy replaced. Answering index.html
+  // would hand it an HTML body where it expects JavaScript, so the tab would
+  // stay blank until the user reloaded. Only real navigation falls back.
+  const assetLike = pathname.startsWith('/assets/') || extname(pathname) !== '';
+  if (assetLike) {
+    response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end('not found');
+    return;
+  }
+
+  if (!existsSync(fallback)) {
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
     response.end('client build not found; run npm run build');
     return;
   }
 
-  sendFile(request, response, filePath);
+  sendFile(request, response, fallback);
 }
 
 /**

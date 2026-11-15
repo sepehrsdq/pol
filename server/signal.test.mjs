@@ -142,3 +142,29 @@ describe('rooms', () => {
     receiver.close();
   });
 });
+
+describe('static assets', () => {
+  // A page still holding the previous deploy asks for a bundle that is gone.
+  // Serving index.html there would parse as JavaScript and fail silently.
+  it('answers 404 for a missing hashed asset instead of the page', async () => {
+    const response = await fetch(`http://127.0.0.1:${PORT}/assets/index-GONE123.js`);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('content-type')).toContain('text/plain');
+    expect(await response.text()).not.toContain('<!doctype html');
+  });
+
+  it('answers 404 for a missing file with any extension', async () => {
+    const response = await fetch(`http://127.0.0.1:${PORT}/icons/missing-192.png`);
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain('<!doctype html');
+  });
+
+  it('keeps the hash route working: an unknown path without extension is the page', async () => {
+    const response = await fetch(`http://127.0.0.1:${PORT}/some/route`);
+    // Without a build the server says so; with one it must be the HTML shell.
+    expect([200, 404]).toContain(response.status);
+    const body = await response.text();
+    if (response.status === 200) expect(body).toContain('<!doctype html');
+    else expect(body).toContain('npm run build');
+  });
+});
