@@ -145,6 +145,19 @@ export function sha256Hex(data: Uint8Array): string {
   return new Sha256().update(data).digestHex();
 }
 
+/** Hash a Blob in slices — used when a received file was stored on disk. */
+export async function hashBlob(blob: Blob): Promise<string> {
+  const hash = new Sha256();
+  const sliceSize = 4 * 1024 * 1024;
+
+  for (let offset = 0; offset < blob.size; offset += sliceSize) {
+    const chunk = await blob.slice(offset, offset + sliceSize).arrayBuffer();
+    hash.update(new Uint8Array(chunk));
+  }
+
+  return hash.digestHex();
+}
+
 /** Hash a File in slices, so a 2 GB file does not need 2 GB of RAM. */
 export async function hashFile(
   file: File,

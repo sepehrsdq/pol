@@ -8,6 +8,8 @@ import {
   shortenName,
 } from './lib/format';
 import { setupReveal } from './lib/reveal';
+import { cleanupStaleFiles, hasOpfs } from './lib/receive-store';
+import { encodeQr, type QrMatrix } from './lib/qr';
 import { trace } from './lib/trace';
 import { formatCode, makeCode, parseCode } from './lib/words';
 import { loadIceServers } from './net/ice';
@@ -44,6 +46,8 @@ const codeBox = el<HTMLDivElement>('code');
 const picked = el<HTMLParagraphElement>('picked');
 const copyButton = el<HTMLButtonElement>('copy-code');
 const cancelButton = el<HTMLButtonElement>('cancel');
+const copyLinkButton = el<HTMLButtonElement>('copy-link');
+const qrBox = el<HTMLDivElement>('qr');
 const joinForm = el<HTMLFormElement>('join-form');
 const codeInput = el<HTMLInputElement>('code-input');
 const alertBox = el<HTMLParagraphElement>('alert');
@@ -101,14 +105,23 @@ let sampleTime = 0;
 let sampleBytes = 0;
 let speed = 0;
 let lastPaint = 0;
-/** Done-bytes of the file in flight, receiver-side, for the session total. */
-let sessionLastDone = 0;
+/** Done-bytes of the file in flight, so the session total reflects it live. */
+let currentFileDone = 0;
 /** Bytes the sender promised so far, receiver-side (sums of meta.size). */
 let sessionBytesTotal = 0;
 /** Size and name of the file currently in flight, for the session list. */
 let lastFileSize = 0;
 let lastSentName = 'file';
 let lastFileMime = 'application/octet-stream';
+/** File already counted into the session total, so a retry does not double it. */
+let countedSendKey: string | null = null;
+let countedReceiveKey: string | null = null;
+/** What the last finished receive actually produced (debug/test hook). */
+let lastVerified: { size: number; expected: number; ok: boolean } | null = null;
+/** Automatic reconnects after a dropped channel, so a loop cannot spin. */
+let reconnectAttempts = 0;
+/** The e2e reload test turns this off to simulate a user who walks away. */
+let autoRetry = true;
 
 let connectAttempt = 0;
 
@@ -178,6 +191,22 @@ function showAlert(message: string, retry?: () => void, detail?: TransferDiagnos
   alertBox.append(button);
 }
 
+/**
+ * Rejoin the same room after a drop. Bounded, so a dead room cannot loop.
+ * Returns false when there is nothing to rejoin or the budget is spent.
+ */
+function scheduleResume(delay = 900): boolean {
+  const attempt = lastAttempt;
+  if (!autoRetry || !attempt || reconnectAttempts >= 2) return false;
+  reconnectAttempts += 1;
+  setStatus('اتصال قطع شد؛ ادامهٔ همان فایل را وصل می‌کنم…', true);
+  window.setTimeout(() => {
+    hideAlert();
+    void connect(attempt.role, attempt.room);
+  }, delay);
+  return true;
+}
+
 function hideResult(): void {
   result.hidden = true;
   result.classList.remove('is-ok', 'is-warn', 'is-animated');
@@ -218,6 +247,9 @@ function sessionStart(role: TransferRole): void {
   session.files = [];
   session.bytes = 0;
   sessionBytesTotal = 0;
+  currentFileDone = 0;
+  countedSendKey = null;
+  countedReceiveKey = null;
   sessionFiles.hidden = true;
   sessionList.replaceChildren();
 }
@@ -225,22 +257,23 @@ function sessionStart(role: TransferRole): void {
 function sessionEnd(): void {
   session.active = false;
   sessionBytesTotal = 0;
+  currentFileDone = 0;
   sessionMeta.hidden = true;
   sessionBarWrap.hidden = true;
 }
 
 function renderSessionMeta(): void {
   const count = session.files.length;
-  sessionMeta.hidden = count === 0 && sessionBytesTotal === 0;
+  const total = session.bytes + currentFileDone;
+  sessionMeta.hidden = count === 0 && total === 0;
   sessionCount.textContent = count > 0 ? `فایل ${formatInt(count)}` : '';
-  sessionTotal.textContent =
-    session.bytes > 0 ? `مجموع ${formatBytes(session.bytes)}` : '';
+  sessionTotal.textContent = total > 0 ? `مجموع ${formatBytes(total)}` : '';
 }
 
 function renderSessionBar(): void {
   sessionBarWrap.hidden = sessionBytesTotal <= 0;
   if (sessionBytesTotal <= 0) return;
-  const ratio = Math.min(1, session.bytes / sessionBytesTotal);
+  const ratio = Math.min(1, (session.bytes + currentFileDone) / sessionBytesTotal);
   const percent = Math.round(ratio * 100);
   sessionBarFill.style.width = `${percent}%`;
   sessionBar.setAttribute('aria-valuenow', String(percent));
@@ -310,6 +343,41 @@ function teardown(): void {
   bridge.classList.remove('is-active');
 }
 
+/** ICE servers of the current session, reused when only the peer is rebuilt. */
+let iceServers: RTCIceServer[] = [];
+
+/**
+ * Rebuild just the peer connection over the socket that already exists.
+ *
+ * A dropped data channel is not a dropped room: rejoining would close this
+ * tab's socket, which the peer sees as "peer-left", and both sides would then
+ * chase each other's reconnects. Keeping the seats and renegotiating in place
+ * leaves the room untouched.
+ */
+function restartPeer(role: TransferRole, delay = 0, quiet = false): void {
+  if (!signal) return;
+  const attempt = ++connectAttempt;
+  const build = (): void => {
+    if (attempt !== connectAttempt || !signal) return;
+    transfer?.close();
+    transfer = buildTransfer(role, iceServers);
+    hideAlert();
+    if (quiet) {
+      if (role === 'sender') void transfer.startOffer();
+      return;
+    }
+    busy = true;
+    if (role === 'sender') {
+      setStatus('اتصال را از نو می‌سازم؛ ادامهٔ همان فایل…', true);
+      void transfer.startOffer();
+    } else {
+      setStatus('اتصال را از نو می‌سازم؛ منتظر ادامهٔ فایل…', true);
+    }
+  };
+  if (delay > 0) window.setTimeout(build, delay);
+  else build();
+}
+
 function reset(): void {
   teardown();
   sessionEnd();
@@ -355,7 +423,9 @@ function describeError(code: string, detail?: TransferDiagnostics): string {
       return 'دو دستگاه به هم نرسیدند. یک بار دیگر بزن؛ اگر نشد، هات‌اسپات موبایل را امتحان کن.';
     }
     case 'channel-closed':
-      return 'طرف مقابل قطع شد. صفحه را نبند تا انتقال تمام شود.';
+      return 'طرف مقابل قطع شد. اگر فایل ناقص مانده باشد، با همان فایل و همان کد ادامه‌اش می‌دهیم.';
+    case 'storage-failed':
+      return 'ذخیره‌کردن فایل روی دستگاه گیرنده نشد. جای خالی مرورگر را چک کن و دوباره تلاش کن.';
     case 'file-too-large':
       return `این انتقال از مسیر رله می‌گذرد و فعلاً تا ۲۰۰ مگابایت پذیرفته می‌شود. اگر هر دو دستگاه روی یک وای‌فای باشند، فایل‌های بزرگ‌تر هم بدون سقف می‌روند.`;
     case 'send-failed':
@@ -366,11 +436,24 @@ function describeError(code: string, detail?: TransferDiagnostics): string {
 }
 
 function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer {
-  return new Transfer(role, iceServers, (payload: SignalPayload) => signal?.relay(payload), {
+  // A transfer that has been replaced must not touch the page: its channel can
+  // die seconds after the drop, and a late event would tear down whatever
+  // connection replaced it.
+  const owner: { current: Transfer | null } = { current: null };
+  const live = (): boolean => owner.current !== null && owner.current === transfer;
+
+  const built = new Transfer(role, iceServers, (payload: SignalPayload) => {
+    if (live()) signal?.relay(payload);
+  }, {
     onState: (state) => {
-      if (state === 'open' && role === 'sender' && sending) {
-        if (!session.active) sessionStart(role);
-        void sendNext();
+      if (!live()) return;
+      if (state === 'open') {
+        reconnectAttempts = 0;
+        hideAlert();
+        if (role === 'sender' && sending) {
+          if (!session.active) sessionStart(role);
+          void sendNext();
+        }
       }
       if (state === 'closed' && busy) {
         busy = false;
@@ -378,36 +461,55 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
       }
     },
     onMeta: (meta: FileMeta) => {
+      if (!live()) return;
       progressCard.hidden = false;
       resetProgress();
+      currentFileDone = 0;
       receivedName = meta.name;
       lastFileSize = meta.size;
       lastFileMime = meta.mime;
       if (!session.active) sessionStart(role);
-      sessionBytesTotal += meta.size;
+      const key = `${meta.name}:${meta.size}`;
+      if (countedReceiveKey !== key) {
+        sessionBytesTotal += meta.size;
+        countedReceiveKey = key;
+      }
       progressName.textContent = shortenName(meta.name);
       progressSize.textContent = `۰ بایت از ${formatBytes(meta.size)}`;
       setStatus('فایل پیدا شد؛ انتقال شروع می‌شود.', true);
     },
+    onResume: (offset, total) => {
+      if (!live()) return;
+      setStatus(`ادامهٔ همان فایل از ${formatBytes(offset)} از ${formatBytes(total)} — بقیه‌اش می‌رسد.`, true);
+    },
     onProgress: (done, total) => {
+      if (!live()) return;
       bridge.classList.add('is-active');
       trackProgress(done, total);
-      // Session bytes: sender promises upfront, receiver counts as they land.
-      if (session.role === 'receiver') {
-        session.bytes = session.bytes - (sessionLastDone ?? 0) + done;
-        sessionLastDone = done;
+      // The session total is completed files plus the one in flight, so a
+      // resumed file is neither lost nor counted twice.
+      currentFileDone = done;
+      if (session.active) {
         renderSessionMeta();
         renderSessionBar();
       }
       renderSessionEta(Math.max(0, total - done));
     },
     onVerified: ({ checked, ok, received, blob }) => {
+      if (!live()) return;
+      lastVerified = { size: blob?.size ?? 0, expected: lastFileSize, ok: checked && ok };
       busy = false;
+      countedReceiveKey = null;
       bridge.classList.remove('is-active');
       setBar(1);
       setStatus(null);
       renderSessionEta(0);
-      addSessionFile({ name: receivedName, size: sessionBytesTotal > 0 ? lastFileSize : 0, ok: checked && ok });
+      addSessionFile({
+        name: receivedName,
+        size: currentFileDone > 0 ? currentFileDone : lastFileSize,
+        ok: checked && ok,
+      });
+      currentFileDone = 0;
       renderSessionMeta();
       renderSessionBar();
       playResultAnimation(checked && ok);
@@ -448,15 +550,23 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
       sessionClose.hidden = false;
       sessionClose.textContent = 'پایان نشست';
     },
-    onAck: (ok) => {
+    onAck: (ok, size) => {
+      if (!live()) return;
       busy = false;
+      countedSendKey = null;
+      // The receiver has confirmed (or rejected) the file, so a later
+      // reconnect must not resend it; a drop before this point does.
+      sending = null;
       bridge.classList.remove('is-active');
       progressCard.hidden = false;
       setBar(1);
       progressSpeed.textContent = '';
       setStatus(null);
       renderSessionEta(0);
-      addSessionFile({ name: lastSentName, size: lastFileSize, ok });
+      // The receiver reports the real byte count, so both sides agree even
+      // when the ZIP size was only an estimate before streaming.
+      addSessionFile({ name: lastSentName, size: size ?? lastFileSize, ok });
+      currentFileDone = 0;
       renderSessionMeta();
       renderSessionBar();
       playResultAnimation(ok);
@@ -472,29 +582,51 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
       sessionClose.textContent = 'پایان نشست';
     },
     onError: (code, detail) => {
+      if (!live()) return;
       busy = false;
       bridge.classList.remove('is-active');
       setStatus(null);
 
       const attempt = lastAttempt;
-      const retry =
-        code === 'connection-failed' && attempt
-          ? () => {
-              // Let the old socket close on the server before rejoining.
-              window.setTimeout(() => void connect(attempt.role, attempt.room), 600);
-            }
-          : undefined;
+      // A dead channel is repaired in place: the room and both seats stay as
+      // they are, so nothing has to rejoin and nothing is counted twice.
+      if (code === 'channel-closed' && autoRetry && attempt && reconnectAttempts < 2) {
+        reconnectAttempts += 1;
+        setStatus('اتصال قطع شد؛ ادامهٔ همان فایل را وصل می‌کنم…', true);
+        showAlert(describeError(code, detail));
+        // The sender offers, so it gives the receiver a moment to rebuild
+        // first; the receiver builds at once and waits for the offer.
+        restartPeer(attempt.role, attempt.role === 'sender' ? 600 : 150);
+        return;
+      }
+
+      const canRetry =
+        (code === 'connection-failed' || code === 'channel-closed') && attempt !== null;
+      const retry = canRetry
+        ? () => {
+            // Let the old socket close on the server before rejoining.
+            window.setTimeout(() => void connect(attempt.role, attempt.room), 600);
+          }
+        : undefined;
 
       showAlert(describeError(code, detail), retry, detail);
     },
   });
+
+  owner.current = built;
+  return built;
 }
 
 function beginSending(meta: { name: string; size: number }): void {
   busy = true;
   lastSentName = meta.name;
   lastFileSize = meta.size;
-  sessionBytesTotal += meta.size;
+  // A resumed attempt announces the same file again; do not count it twice.
+  const key = `${meta.name}:${meta.size}`;
+  if (countedSendKey !== key) {
+    sessionBytesTotal += meta.size;
+    countedSendKey = key;
+  }
   hideAlert();
   hideResult();
   progressCard.hidden = false;
@@ -517,10 +649,18 @@ async function connect(role: TransferRole, room: string): Promise<void> {
   const ice = await loadIceServers(defaultSignalUrl());
   if (attempt !== connectAttempt || !busy) return;
 
+  iceServers = ice.servers;
   transfer = buildTransfer(role, ice.servers);
-  signal = new SignalClient(defaultSignalUrl(), room, role, {
-    onMessage: (message: ServerMessage) => handleServerMessage(message, role),
+  // Every socket for this tab carries the same client id, so the server can
+  // hand our own seat back after a drop without ever kicking the peer.
+  let client: SignalClient | null = null;
+  client = new SignalClient(defaultSignalUrl(), room, role, {
+    onMessage: (message: ServerMessage) => {
+      if (client === null || signal !== client) return;
+      handleServerMessage(message, role);
+    },
     onClose: () => {
+      if (client === null || signal !== client) return;
       if (!busy) return;
       busy = false;
       setStatus(null);
@@ -530,6 +670,7 @@ async function connect(role: TransferRole, room: string): Promise<void> {
       );
     },
   });
+  signal = client;
 
   setStatus(role === 'sender' ? 'منتظر وصل‌شدن طرف مقابل…' : 'در حال وصل‌شدن…', true);
 }
@@ -538,12 +679,13 @@ function handleServerMessage(message: ServerMessage, role: TransferRole): void {
   debug('signal', message.t, role);
   switch (message.t) {
     case 'ready': {
-      if (role === 'sender') {
-        setStatus('طرف مقابل وصل شد؛ پیشنهاد اتصال می‌رود.', true);
-        void transfer?.startOffer();
-      } else {
-        setStatus('وصل شدی. منتظر فایل…', true);
-      }
+      // Both seats are present. Build the peer connection now (a rejoin after
+      // a drop leaves the old one dead), and let the sender offer.
+      setStatus(
+        role === 'sender' ? 'طرف مقابل وصل شد؛ پیشنهاد اتصال می‌رود.' : 'وصل شدی. منتظر فایل…',
+        true,
+      );
+      restartPeer(role, 0, true);
       return;
     }
     case 's': {
@@ -555,13 +697,30 @@ function handleServerMessage(message: ServerMessage, role: TransferRole): void {
       });
       return;
     }
+    case 'replaced': {
+      // Our own socket was superseded by this tab's newer one; rejoin quietly.
+      teardown();
+      busy = false;
+      reconnectAttempts = 0;
+      setStatus('اتصال را از نو برقرار می‌کنم…', true);
+      window.setTimeout(() => {
+        if (lastAttempt) void connect(lastAttempt.role, lastAttempt.room);
+      }, 200);
+      return;
+    }
     case 'full': {
+      // A just-dropped peer can still hold the room for a moment; a resume
+      // retry is allowed to wait it out.
+      if (scheduleResume(1400)) return;
       busy = false;
       setStatus(null);
       showAlert('این کد همین حالا در حال استفاده است. یک بار دیگر فایل را انتخاب کن تا کد تازه بگیری.');
       return;
     }
     case 'peer-left': {
+      // Our socket is fine; only the other side vanished (tab closed, network
+      // gone). Reconnecting here would close our own socket and make the peer
+      // do the same, so wait: the room tells us when they are back.
       busy = false;
       setStatus(null);
       showAlert('طرف مقابل قطع شد.');
@@ -614,6 +773,7 @@ function startSendingFile(file: File): void {
   nameNode.textContent = shortenName(file.name);
   picked.append(nameNode, document.createTextNode(` — ${formatBytes(file.size)}`));
   codeCard.hidden = false;
+  renderShareCode(words);
   hideResult();
   hideAlert();
 
@@ -648,6 +808,7 @@ function startSendingText(text: string): void {
   picked.replaceChildren();
   picked.append(document.createTextNode(`متن — ${formatBytes(new Blob([trimmed]).size)}`));
   codeCard.hidden = false;
+  renderShareCode(words);
   hideResult();
   hideAlert();
 
@@ -704,6 +865,7 @@ function startSendingFolder(files: File[]): void {
     document.createTextNode(`پوشهٔ «${root || 'folder'}» — ${formatInt(entries.length)} فایل — ${formatBytes(totalSize)}`),
   );
   codeCard.hidden = false;
+  renderShareCode(words);
   hideResult();
   hideAlert();
 
@@ -762,6 +924,54 @@ function startReceiving(input: string): void {
   activeWords = words;
   reset();
   void connect('receiver', formatCode(words));
+}
+
+/** The link a phone can open straight into this session. */
+function shareLink(words: string[]): string {
+  return `${location.origin}/#${words.join('-')}`;
+}
+
+/** Draw the share link as a QR in the code card. */
+function renderShareCode(words: string[]): void {
+  try {
+    renderQr(encodeQr(shareLink(words)));
+  } catch {
+    qrBox.hidden = true;
+    qrBox.replaceChildren();
+  }
+}
+
+function renderQr(matrix: QrMatrix): void {
+  const size = matrix.length;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'کد QR این نشست؛ با دوربین گوشی بخوان');
+  let path = '';
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      if (matrix[y]?.[x]) path += `M${x} ${y}h1v1h-1z`;
+    }
+  }
+  const shape = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  shape.setAttribute('d', path);
+  svg.append(shape);
+  qrBox.replaceChildren(svg);
+  qrBox.hidden = false;
+}
+
+/** A four-word code carried in the URL hash, if the link has one. */
+function codeFromLocation(): string | null {
+  const raw = location.hash.replace(/^#/, '').trim();
+  if (!raw) return null;
+  let decoded = raw;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    /* keep the raw text; parseCode will reject it if it is not a code */
+  }
+  const words = parseCode(decoded.replace(/[-+_]/g, ' '));
+  return words ? formatCode(words) : null;
 }
 
 async function copyCode(): Promise<void> {
@@ -926,6 +1136,18 @@ window.addEventListener('dragover', (event) => event.preventDefault());
 window.addEventListener('drop', (event) => event.preventDefault());
 
 copyButton.addEventListener('click', () => void copyCode());
+copyLinkButton.addEventListener('click', async () => {
+  if (!activeWords) return;
+  try {
+    await navigator.clipboard.writeText(shareLink(activeWords));
+    copyLinkButton.textContent = 'کپی شد';
+  } catch {
+    copyLinkButton.textContent = 'کپی نشد';
+  }
+  window.setTimeout(() => {
+    copyLinkButton.textContent = 'کپی لینک';
+  }, 1600);
+});
 cancelButton.addEventListener('click', () => reset());
 sessionClose.addEventListener('click', () => reset());
 copyTextButton.addEventListener('click', async () => {
@@ -953,4 +1175,70 @@ window.addEventListener('beforeunload', (event) => {
   event.returnValue = '';
 });
 
+// A link with a code in the hash (from the QR or a shared URL) joins straight
+// away: scanning with a phone should land in the room, not on the landing page.
+function joinFromLocation(): void {
+  const code = codeFromLocation();
+  if (!code || busy) return;
+  setMode('receive');
+  codeInput.value = code;
+  startReceiving(code);
+}
+
+joinFromLocation();
+window.addEventListener('hashchange', joinFromLocation);
+
+// The installed app keeps working with the network down; the browser only
+// offers installation on its own schedule, so the button appears when it does.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register('/sw.js').catch(() => undefined);
+  });
+}
+
+interface InstallPrompt extends Event {
+  prompt(): Promise<void>;
+}
+
+let installPrompt: InstallPrompt | null = null;
+const installButton = el<HTMLButtonElement>('install');
+
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  installPrompt = event as InstallPrompt;
+  installButton.hidden = false;
+});
+
+installButton.addEventListener('click', async () => {
+  if (!installPrompt) return;
+  await installPrompt.prompt();
+  installPrompt = null;
+  installButton.hidden = true;
+});
+
 setBar(0);
+
+// Leftovers from earlier visits (finished downloads whose blob is gone) are
+// swept once per load; a pending resume is spared.
+void cleanupStaleFiles();
+
+// A tiny test hook: the e2e suite uses it to drop the channel mid-transfer and
+// prove that the receiver resumes instead of starting over. Gated so a normal
+// visit never sees it.
+if (new URLSearchParams(location.search).has('debug')) {
+  (window as unknown as { polDebug: unknown }).polDebug = {
+    interrupt: () => transfer?.interrupt(),
+    hasOpfs: () => hasOpfs(),
+    progress: () => progressSize.textContent,
+    /** Bytes the session total currently shows, for exact e2e assertions. */
+    sessionBytes: () => session.bytes + currentFileDone,
+    /** Size/result of the last finished receive. */
+    lastReceive: () => lastVerified,
+    /** Stop the automatic rejoin so a reload can be tested as a clean start. */
+    stopRetries: () => {
+      autoRetry = false;
+    },
+  };
+}
+
+

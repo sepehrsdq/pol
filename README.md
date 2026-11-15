@@ -15,6 +15,9 @@ Send a file straight from one browser to another. Pick a file, get four words, h
 - **Multi-file sessions** — the room stays open after a transfer: drop the next file and it rides the same connection, no new code. Both sides keep a per-session list with sizes and a total, and the sender sees an ETA while a file is in flight.
 - **Text & clipboard** — paste or type a snippet and send it: the receiver reads it inline and copies it back with one click.
 - **Folders as streaming ZIP** — pick a folder (or drop one), it becomes a ZIP sent as it is built: files stream through the CRC into 64 KB chunks, nothing is held in memory whole.
+- **Resume after a drop** — the receiver writes incoming bytes to the browser's private file system (OPFS), so a multi-gigabyte file never sits in the tab's memory. If the connection dies — or the receiver's page is reloaded — the next attempt continues from the stored byte count, and the final SHA-256 still covers the whole file.
+- **QR handoff** — the code card carries a QR of the room link, so a phone scans it and lands in the same room. The encoder is built in; no QR library is shipped.
+- **Installable** — a manifest and a service worker make Pol installable, and the app shell opens without a network.
 - **Four-word code** — four Persian words from a 64-word list, easy to read over the phone and type on a mobile keyboard.
 - **Direct transfer** — file bytes only use the data channel. The signal server introduces the two browsers and relays SDP/ICE; it never sees the file.
 - **Integrity check** — both sides hash while the bytes move, and the digest rides along with the last control message. There is no separate pass over the file, so a large file starts sending right away and never needs its size in RAM twice.
@@ -56,8 +59,8 @@ TURN_PASSWORD=...
 The API key never reaches the browser: the server fetches short-lived credentials, caches them for 10 minutes, and hands those to clients.
 
 ```bash
-npm test        # 64 tests: word codes, file sizes, SHA-256, CRC-32, ZIP, ICE config, Metered
-npm run e2e     # real-Chrome test: 3 files + a text snippet + a folder ZIP, one session
+npm test        # 82 tests: word codes, sizes, SHA-256, CRC-32, ZIP, QR, OPFS store, ICE, Metered, rooms
+npm run e2e     # real Chrome: 3 files + text + folder ZIP + two interrupted transfers, one session
 npm run build   # typecheck + production build
 ```
 
@@ -65,18 +68,21 @@ npm run build   # typecheck + production build
 
 ```
 index.html          one page, no UI framework
-src/lib/            pure logic: word code, SHA-256, formatting
+src/lib/            pure logic: word code, SHA-256, CRC-32, ZIP, QR, OPFS store
 src/net/            signaling client and WebRTC transfer
 server/signal.mjs   rooms and SDP/ICE relay (~150 lines)
 ```
 
 The sender creates a data channel and offers; the receiver answers. Files are sliced into 64 KB chunks with backpressure at 4 MB buffered, then verified with SHA-256. A room code is only a room identifier — encryption comes from DTLS, and a key derived from the code (SPAKE2) is planned for v0.7.
 
+When the receiver supports the origin private file system (every current Chromium and Firefox), bytes are written to disk as they arrive instead of piling up in the tab. The receiver answers each file announcement with a `ready` carrying its byte offset, so a resumed file continues where it stopped while the sender still hashes the whole file from the first byte.
+
 Known limits:
 
 - STUN is built in, so most home networks connect directly. Cross-network transfers go through a TURN relay and are capped at 200 MB for now; symmetric NAT and restrictive firewalls can still block even the relay path in rare cases.
-- One code per session, but many payloads per session: files, text snippets and folders (as ZIP) ride the same room until you press «پایان نشست». Resume-after-disconnect is not built yet.
-- The file is assembled in the tab's memory, so multi-gigabyte transfers are not practical yet.
+- One code per session, but many payloads per session: files, text snippets and folders (as ZIP) ride the same room until you press «پایان نشست».
+- A partial file stays on disk for the next attempt (same name, size and last-modified) and is swept on a later page load; old partials are not kept as a library.
+- Installed, the app opens offline, but a transfer still needs the signaling server to introduce the two browsers.
 - If the signal server is malicious it could theoretically sit in the middle. The code does not protect against that yet.
 
 ## فارسی
@@ -95,8 +101,9 @@ npm run dev          # ترمینال دوم
 
 - کد چهارکلمه‌ای فقط شناسهٔ اتاق است، نه رمز. رمزنگاری از خود WebRTC می‌آید.
 - STUN داخل خود برنامه است، پس بیشتر شبکه‌های خانگی مستقیم وصل می‌شوند. انتقال بین دو شبکهٔ جدا از رلهٔ TURN می‌گذرد و فعلاً سقف ۲۰۰ مگابایت دارد.
-- هر نشست چند چیز: فایل، متن/کلیپ‌بورد و پوشه (به‌صورت ZIP) روی همان اتاق می‌روند تا «پایان نشست» را بزنی. ادامهٔ انتقال بعد از قطعی هنوز نیست.
-- فایل در حافظهٔ تب جمع می‌شود؛ برای فایل چند گیگابایتی مناسب نیست.
+- هر نشست چند چیز: فایل، متن/کلیپ‌بورد و پوشه (به‌صورت ZIP) روی همان اتاق می‌روند تا «پایان نشست» را بزنی.
+- **قطع شد؟ ادامه می‌دهد.** گیرنده بایت‌ها را روی دیسک مرورگر (OPFS) می‌نویسد؛ اگر اتصال قطع شود یا صفحه رفرش شود، همان فایل از همان بایت ادامه می‌یابد و هش نهایی همچنان کل فایل را می‌سنجد.
+- **QR:** کد اتاق به‌شکل QR هم هست؛ با دوربین گوشی بخوان تا مستقیم وارد همان نشست شود. پل روی گوشی و لپ‌تاپ نصب‌شدنی است و آفلاین هم باز می‌شود (برای انتقال، سرور معرفی لازم است).
 - سلامت فایل با SHA-256 بررسی می‌شود و در پایان، نتیجه روی هر دو طرف دیده می‌شود. هش هم‌زمان با ارسال حساب می‌شود، پس فایل بزرگ قبل از شروع یک دور اضافه خوانده نمی‌شود.
 
 ## License

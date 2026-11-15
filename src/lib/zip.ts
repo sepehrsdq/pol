@@ -34,6 +34,23 @@ export type ZipChunk =
   | { kind: 'patch'; /** Offset of the little-endian value to set. */ offset: number; value: number };
 
 /**
+ * Exact byte size of the archive buildZip will produce: local header (30) +
+ * name + data + descriptor (12) per entry, central directory (46 + name) per
+ * entry, then the 22-byte EOCD. Names are UTF-8, so the byte length is what
+ * counts, not the character count.
+ */
+export function zipSize(entries: { name: string; size: number }[]): number {
+  const encoder = new TextEncoder();
+  let total = 22;
+  for (const entry of entries) {
+    const nameBytes = encoder.encode(entry.name).length;
+    total += 30 + nameBytes + entry.size + 12;
+    total += 46 + nameBytes;
+  }
+  return total;
+}
+
+/**
  * Build a ZIP archive as an ordered mix of raw bytes and header patches.
  * The caller streams the chunks and applies patches to its own output buffer
  * before sending the patched range onward.

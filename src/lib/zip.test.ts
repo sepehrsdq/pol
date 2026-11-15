@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildZip, type ZipEntry } from './zip';
+import { buildZip, zipSize, type ZipEntry } from './zip';
 import { crc32 } from './crc32';
 
 /** Materialize the generator into one buffer, applying patches. */
@@ -120,5 +120,15 @@ describe('buildZip', () => {
     const nameLen = view.getUint16(26, true);
     const payload = buffer.subarray(30 + nameLen, 30 + nameLen + text.length);
     expect(declared).toBe(parseInt(crc32(payload), 16));
+  });
+
+  it('predicts the exact archive size, including multi-byte names', async () => {
+    const entries = [
+      textEntry('a.txt', 'aaa'),
+      textEntry('پوشه/عکس.png', 'x'.repeat(1234)),
+      textEntry('sub/dir/data.bin', '1234567890'),
+    ];
+    const buffer = await materialize(entries);
+    expect(zipSize(entries)).toBe(buffer.length);
   });
 });

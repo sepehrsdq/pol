@@ -1,5 +1,13 @@
-import { Sha256 } from '../lib/sha256';
-import { buildZip, type ZipEntry } from '../lib/zip';
+import { hashBlob, Sha256 } from '../lib/sha256';
+import {
+  createStore,
+  markSuspending,
+  parkForResume,
+  takeResume,
+  type ReceiveStore,
+  type StoreMeta,
+} from '../lib/receive-store';
+import { buildZip, zipSize, type ZipEntry } from '../lib/zip';
 import { trace } from '../lib/trace';
 
 const CHUNK_SIZE = 64 * 1024;
@@ -11,8 +19,6 @@ const LOW_WATER = 1 * 1024 * 1024;
  * Direct transfers on the same network have no size limit.
  */
 export const RELAY_SIZE_LIMIT = 200 * 1024 * 1024;
-/** Headers + data descriptors + central directory, per archive entry. */
-const ZIP_OVERHEAD_PER_FILE = 200;
 /** Bytes held back while header patches are still possible. */
 const PATCH_WINDOW = 256 * 1024;
 
@@ -39,6 +45,8 @@ export interface FileMeta {
   size: number;
   mime: string;
   hash: string | null;
+  /** Origin lastModified, for matching a resumable partial file. */
+  modified?: number | null;
 }
 
 export type SignalPayload =
@@ -54,7 +62,12 @@ export interface VerifyResult {
   blob: Blob | null;
 }
 
-export type TransferError = 'connection-failed' | 'channel-closed' | 'send-failed' | 'file-too-large';
+export type TransferError =
+  | 'connection-failed'
+  | 'channel-closed'
+  | 'send-failed'
+  | 'file-too-large'
+  | 'storage-failed';
 
 /** What the browser managed to gather, so a failure can be explained. */
 export interface TransferDiagnostics {
@@ -66,8 +79,10 @@ export interface TransferEvents {
   onState: (state: 'connecting' | 'open' | 'closed') => void;
   onMeta: (meta: FileMeta) => void;
   onProgress: (done: number, total: number) => void;
+  /** A partial copy was found and the transfer continues from this offset. */
+  onResume?: (offset: number, total: number) => void;
   onVerified: (result: VerifyResult) => void;
-  onAck: (ok: boolean) => void;
+  onAck: (ok: boolean, size?: number) => void;
   onError: (error: TransferError, detail?: TransferDiagnostics) => void;
 }
 
@@ -121,9 +136,11 @@ export class Transfer {
   private channel: RTCDataChannel | null = null;
   private pendingIce: RTCIceCandidateInit[] = [];
   private finished = false;
+  private channelLost = false;
 
   private opened = false;
   private restarted = false;
+  private offered = false;
   private giveUpTimer = 0;
   private restartTimer = 0;
   private readonly candidateTypes = new Set<string>();
@@ -133,8 +150,18 @@ export class Transfer {
   private expectedSize = 0;
   private mime = 'application/octet-stream';
   private receiveHash: Sha256 | null = null;
-  private received: Uint8Array<ArrayBuffer>[] = [];
+  private store: ReceiveStore | null = null;
+  private storeMeta: StoreMeta | null = null;
+  private writeChain: Promise<void> = Promise.resolve();
+  private writeError: unknown = null;
+  private early: Uint8Array[] = [];
+  private resumed = false;
+  private parked = false;
   private receivedBytes = 0;
+
+  /** Sender side: offset a resuming receiver asked for, resolved once. */
+  private readyOffset: number | null = null;
+  private readyResolver: (() => void) | null = null;
 
   constructor(
     role: TransferRole,
@@ -281,6 +308,7 @@ export class Transfer {
 
   private attach(channel: RTCDataChannel): void {
     this.channel = channel;
+    this.channelLost = false;
     channel.binaryType = 'arraybuffer';
     this.events.onState('connecting');
     trace('channel attached', channel.label);
@@ -296,8 +324,13 @@ export class Transfer {
 
     channel.addEventListener('close', () => {
       trace('dc close');
+      this.channelLost = true;
       this.events.onState('closed');
-      if (!this.finished) this.events.onError('channel-closed');
+      if (!this.finished && !this.parked) {
+        // A receiver holding a partial file keeps it for the next session.
+        if (this.role === 'receiver' && this.store) void this.suspendReceive();
+        this.events.onError('channel-closed');
+      }
     });
 
     channel.addEventListener('message', (event) => {
@@ -307,6 +340,11 @@ export class Transfer {
   }
 
   async startOffer(): Promise<void> {
+    // A transfer that already offered must not offer again: after a drop its
+    // peer connection is dead, and a second offer from it can collide with the
+    // fresh connection that replaced it.
+    if (this.offered) return;
+    this.offered = true;
     const offer = await this.pc.createOffer();
     await this.pc.setLocalDescription(offer);
     trace('offer ready', offer.sdp?.length ?? 0);
@@ -339,8 +377,38 @@ export class Transfer {
   }
 
   /**
+   * How long to wait for the receiver's ready/offset before starting at 0.
+   * The receiver answers this on its own (it may spend a moment opening the
+   * partial file), so the wait is deliberately long: starting at 0 while it
+   * resumes at N would splice the file together wrongly.
+   */
+  private waitForReady(channel: RTCDataChannel, ms = 30_000): Promise<number> {
+    if (this.readyOffset !== null) return Promise.resolve(this.readyOffset);
+    return new Promise((resolve) => {
+      const done = (value: number): void => {
+        window.clearTimeout(timer);
+        channel.removeEventListener('close', onClose);
+        resolve(value);
+      };
+      const timer = window.setTimeout(() => {
+        this.readyResolver = null;
+        done(0);
+      }, ms);
+      const onClose = (): void => {
+        this.readyResolver = null;
+        done(0);
+      };
+      channel.addEventListener('close', onClose);
+      this.readyResolver = () => done(this.readyOffset ?? 0);
+    });
+  }
+
+  /**
    * Stream arbitrary byte chunks with hashing and backpressure, as
    * `meta` → bytes → `end`. Both sendFile and the folder ZIP ride this.
+   * When the receiver already holds part of this file (resume), it answers
+   * the meta with its offset and only the remaining bytes go on the wire —
+   * the hash still covers the whole file.
    */
   private async streamBytes(
     channel: RTCDataChannel,
@@ -348,16 +416,31 @@ export class Transfer {
     mime: string,
     size: number,
     source: AsyncGenerator<Uint8Array>,
+    modified: number | null = null,
   ): Promise<void> {
-    const meta: FileMeta = { name, size, mime, hash: null };
+    const meta: FileMeta = { name, size, mime, hash: null, modified };
+    this.readyOffset = null;
+    this.readyResolver = null;
+    // A previous transfer's "done" must not suppress this one's failure path.
+    this.finished = false;
+    this.parked = false;
     channel.send(JSON.stringify({ kind: 'meta', ...meta }));
 
+    const offset = await this.waitForReady(channel);
+    trace('stream start', offset, 'of', size);
     const hash = new Sha256();
+    let sent = Math.min(offset, size);
     try {
-      let sent = 0;
+      let position = 0;
       for await (const block of source) {
         hash.update(block);
-        for (let inner = 0; inner < block.byteLength; inner += CHUNK_SIZE) {
+        const blockStart = position;
+        position += block.byteLength;
+        // Skip whatever the receiver already has; keep hashing regardless.
+        const from = Math.max(0, offset - blockStart);
+        if (from >= block.byteLength) continue;
+
+        for (let inner = from; inner < block.byteLength; inner += CHUNK_SIZE) {
           if (channel.bufferedAmount > HIGH_WATER) await waitDrain(channel);
           const end = Math.min(inner + CHUNK_SIZE, block.byteLength);
           const slice = new Uint8Array(block.buffer, block.byteOffset + inner, end - inner);
@@ -370,6 +453,8 @@ export class Transfer {
       }
       channel.send(JSON.stringify({ kind: 'end', hash: hash.digestHex() }));
     } catch {
+      // A drop mid-stream is reported once by the channel's close handler.
+      if (this.channelLost) return;
       this.events.onError('send-failed');
     }
   }
@@ -407,7 +492,14 @@ export class Transfer {
       }
     }
 
-    await this.streamBytes(channel, file.name, file.type || 'application/octet-stream', file.size, fileSource());
+    await this.streamBytes(
+      channel,
+      file.name,
+      file.type || 'application/octet-stream',
+      file.size,
+      fileSource(),
+      file.lastModified || null,
+    );
   }
 
   /** Send a text snippet as a synthetic .txt file — same pipeline, no chunking cost. */
@@ -439,7 +531,7 @@ export class Transfer {
     }
     await waitOpen(channel);
 
-    const total = entries.reduce((sum, entry) => sum + entry.size, 0) + ZIP_OVERHEAD_PER_FILE * entries.length + 128;
+    const total = zipSize(entries.map((entry) => ({ name: entry.path, size: entry.size })));
     if (total > RELAY_SIZE_LIMIT && (await this.usesRelay())) {
       trace('relay limit', total);
       this.events.onError('file-too-large');
@@ -502,7 +594,8 @@ export class Transfer {
       for await (const block of flush(base + pendingBytes)) yield block;
     }
 
-    await this.streamBytes(channel, zipName, 'application/zip', total, zipSource());
+    const modified = entries.reduce((max, entry) => Math.max(max, entry.modified?.getTime() ?? 0), 0) || null;
+    await this.streamBytes(channel, zipName, 'application/zip', total, zipSource(), modified);
   }
 
   private handleControl(raw: string): void {
@@ -517,47 +610,154 @@ export class Transfer {
       this.expectedSize = Number(message.size) || 0;
       this.expectedHash = typeof message.hash === 'string' ? message.hash : null;
       this.mime = typeof message.mime === 'string' ? message.mime : 'application/octet-stream';
-      this.receiveHash = new Sha256();
-      this.received = [];
-      this.receivedBytes = 0;
-      this.events.onMeta({
-        name: String(message.name ?? 'file'),
-        size: this.expectedSize,
-        mime: this.mime,
-        hash: this.expectedHash,
-      });
+      const modified = typeof message.modified === 'number' ? message.modified : null;
+      const name = String(message.name ?? 'file');
+      this.beginReceive({ name, size: this.expectedSize, mime: this.mime, modified });
+      this.events.onMeta({ name, size: this.expectedSize, mime: this.mime, hash: this.expectedHash });
       return;
     }
 
     if (message.kind === 'end') {
       this.finished = true;
-      const received = this.receiveHash ? this.receiveHash.digestHex() : null;
-      // New senders declare the digest here; old ones put it in "meta".
-      const declared = typeof message.hash === 'string' ? message.hash : this.expectedHash;
-      const checked = received !== null && declared !== null;
-      const sizeOk = this.receivedBytes === this.expectedSize;
-      const ok = checked && received === declared && sizeOk;
-      const blob = new Blob(this.received, { type: this.mime });
-      this.channel?.send(JSON.stringify({ kind: 'done', ok, hash: received }));
-      this.events.onVerified({ checked, ok, expected: declared, received, blob });
+      void this.finishReceive(message);
+      return;
+    }
+
+    if (message.kind === 'ready') {
+      // Receiver's resume offset arrives before any byte.
+      this.readyOffset = Number(message.offset) || 0;
+      this.readyResolver?.();
+      this.readyResolver = null;
+      trace('receiver ready at', this.readyOffset);
       return;
     }
 
     if (message.kind === 'done') {
       this.finished = true;
-      this.events.onAck(Boolean(message.ok));
+      this.events.onAck(Boolean(message.ok), typeof message.size === 'number' ? message.size : undefined);
     }
+  }
+
+  /** Prepare storage (resuming when the receiver holds a partial copy). */
+  private beginReceive(meta: StoreMeta): void {
+    this.storeMeta = meta;
+    this.receivedBytes = 0;
+    this.early = [];
+    this.writeChain = Promise.resolve();
+    this.writeError = null;
+    this.receiveHash = null;
+    this.store = null;
+    this.finished = false;
+    this.parked = false;
+
+    void (async () => {
+      let store = (await takeResume(meta)) ?? (await createStore(meta));
+      // A partial file only helps if the sender honoured its offset. Bytes that
+      // arrived before the store was ready mean it started from zero, so the
+      // stale prefix has to go.
+      if (store.offset > 0 && this.early.length > 0) {
+        await store.discard();
+        store = await createStore(meta);
+      }
+      this.resumed = store.offset > 0;
+      if (!this.resumed) this.receiveHash = new Sha256();
+      this.store = store;
+      trace('store pick', store.offset, 'early', this.early.length, meta.name);
+      let queued = 0;
+      for (const chunk of this.early.splice(0)) {
+        queued += chunk.byteLength;
+        this.enqueueWrite(chunk);
+      }
+      this.receivedBytes = store.offset + queued;
+      if (this.resumed) {
+        this.events.onResume?.(this.receivedBytes, this.expectedSize);
+        this.events.onProgress(this.receivedBytes, this.expectedSize);
+      }
+      this.channel?.send(JSON.stringify({ kind: 'ready', offset: store.offset }));
+      trace('store ready', this.resumed ? `resume ${store.offset}` : 'fresh');
+    })();
+  }
+
+  private enqueueWrite(bytes: Uint8Array): void {
+    const store = this.store;
+    if (!store) {
+      this.early.push(bytes);
+      return;
+    }
+    this.writeChain = this.writeChain.then(() => store.write(bytes)).catch((error: unknown) => {
+      this.writeError = error;
+      trace('store write failed', error);
+    });
+  }
+
+  private async finishReceive(message: Record<string, unknown>): Promise<void> {
+    const declared = typeof message.hash === 'string' ? message.hash : this.expectedHash;
+    await this.writeChain;
+    const store = this.store;
+    if (this.writeError || !store) {
+      this.events.onError('storage-failed');
+      return;
+    }
+
+    let blob: Blob;
+    try {
+      blob = await store.finish();
+    } catch (error) {
+      trace('store finish failed', error);
+      this.events.onError('storage-failed');
+      return;
+    }
+
+    // A resumed transfer has no continuous hash state: hash the stored file.
+    const received = this.resumed ? await hashBlob(blob) : (this.receiveHash?.digestHex() ?? null);
+    const checked = received !== null && declared !== null;
+    const sizeOk = blob.size === this.expectedSize;
+    trace('finish receive', blob.size, 'of', this.expectedSize, this.resumed ? 'resumed' : 'fresh');
+    const ok = checked && received === declared && sizeOk;
+    this.channel?.send(JSON.stringify({ kind: 'done', ok, hash: received, size: blob.size }));
+    this.events.onVerified({ checked, ok, expected: declared, received, blob });
+  }
+
+  /** Keep the partial file so the next session can continue it. */
+  private async suspendReceive(): Promise<void> {
+    if (!this.store || !this.storeMeta || this.finished) return;
+    this.parked = true;
+    const meta = this.storeMeta;
+    const store = this.store;
+    const work = (async () => {
+      await this.writeChain;
+      // Park first: the next attempt may pick this store up as soon as the
+      // suspend it is waiting for has landed.
+      parkForResume(meta, store);
+      trace('suspend store', store.offset, 'of', this.receivedBytes);
+      await store.suspend().catch(() => undefined);
+    })();
+    markSuspending(work);
+    await work;
   }
 
   private handleBytes(data: ArrayBuffer): void {
     const bytes = new Uint8Array(data);
-    this.received.push(bytes);
     this.receivedBytes += bytes.byteLength;
+    this.enqueueWrite(bytes);
     this.receiveHash?.update(bytes);
     this.events.onProgress(this.receivedBytes, this.expectedSize);
   }
 
+  /**
+   * Drop the data channel as a network failure would, keeping the partial
+   * receiver state so the next attempt resumes. Used by the resume e2e test.
+   */
+  interrupt(): void {
+    this.channel?.close();
+  }
+
   close(): void {
+    // A teardown mid-file keeps what has been written so far: the next
+    // attempt resumes from the real file size instead of the last flush.
+    if (!this.finished && !this.parked && this.role === 'receiver' && this.store) {
+      void this.suspendReceive();
+    }
     this.finished = true;
     window.clearTimeout(this.giveUpTimer);
     window.clearTimeout(this.restartTimer);

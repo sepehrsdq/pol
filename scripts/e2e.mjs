@@ -19,7 +19,8 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import jsQR from 'jsqr';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -72,6 +73,23 @@ function log(message) {
 function fail(message) {
   console.error(`[e2e] FAIL: ${message}`);
   process.exitCode = 1;
+}
+
+/** Set once both tabs exist, so a failure can dump their trace rings. */
+let activeTabs = null;
+
+async function dumpTraces() {
+  if (!activeTabs || process.exitCode !== 1) return;
+  for (const [label, tab] of Object.entries(activeTabs)) {
+    try {
+      const lines = await tab.evaluate(() => (window.__polTrace ?? []).slice(-60));
+      if (lines.length === 0) continue;
+      console.error(`[e2e] --- ${label} trace ---`);
+      for (const line of lines) console.error(`[e2e]   ${line}`);
+    } catch {
+      /* tab may be gone */
+    }
+  }
 }
 
 async function firstFreePort(preferred) {
@@ -170,6 +188,16 @@ class CdpTab {
       await sleep(250);
     }
     throw new Error('app page never finished loading');
+  }
+
+  /** Reload the current page and wait until the app is back. */
+  async reload() {
+    const { result } = await this.send('Runtime.evaluate', {
+      expression: 'location.href',
+      returnByValue: true,
+    });
+    await this.send('Page.navigate', { url: result.value });
+    await this.waitForPageReady();
   }
 
   /** Evaluate an async function body in the page and return its value. */
@@ -276,6 +304,7 @@ async function submitCode(receiverTab, code) {
 
 async function waitForReceiverResult(receiverTab, timeoutMs = 60_000, previousHash = null, wantedMime = null) {
   const deadline = Date.now() + timeoutMs;
+  let last = null;
   while (Date.now() < deadline) {
     const snapshot = await receiverTab.evaluate(() => {
       const alert = document.getElementById('alert');
@@ -295,6 +324,7 @@ async function waitForReceiverResult(receiverTab, timeoutMs = 60_000, previousHa
       };
     });
     if (snapshot.alert) throw new Error(`receiver alert: ${snapshot.alert}`);
+    last = snapshot;
     // previousHash: the card may still show the last file's result; wait for a new one.
     const fresh = snapshot.hash && (!previousHash || !snapshot.hash.includes(previousHash));
     // wantedMime: text results show the inline view; zip/file results the download.
@@ -306,7 +336,7 @@ async function waitForReceiverResult(receiverTab, timeoutMs = 60_000, previousHa
     if (snapshot.resultVisible && fresh && mimeOk) return snapshot;
     await sleep(500);
   }
-  throw new Error('receiver never showed a verified result');
+  throw new Error(`receiver never showed a verified result (last: ${JSON.stringify(last)})`);
 }
 
 async function waitForSenderAck(senderTab, timeoutMs = 60_000) {
@@ -329,8 +359,30 @@ async function waitForSenderAck(senderTab, timeoutMs = 60_000) {
   throw new Error('sender never saw the ack');
 }
 
-/** Minimal ZIP store reader: local headers only, method 0 entries. */
-function readZipStore(bytes) {
+/** Decode a QR module matrix the page produced, using a real decoder. */
+function decodeMatrix(modules) {
+  const size = modules.length;
+  const scale = 4;
+  const quiet = 4;
+  const width = (size + quiet * 2) * scale;
+  const pixels = new Uint8ClampedArray(width * width * 4).fill(255);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      if (!modules[y][x]) continue;
+      for (let dy = 0; dy < scale; dy += 1) {
+        for (let dx = 0; dx < scale; dx += 1) {
+          const px = (((quiet + y) * scale + dy) * width + (quiet + x) * scale + dx) * 4;
+          pixels[px] = 0;
+          pixels[px + 1] = 0;
+          pixels[px + 2] = 0;
+        }
+      }
+    }
+  }
+  return jsQR(pixels, width, width)?.data ?? null;
+}
+
+/** Minimal ZIP store reader: local headers only, method 0 entries. */function readZipStore(bytes) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const entries = [];
   let cursor = 0;
@@ -395,8 +447,10 @@ async function main() {
     chrome = await launchChrome(profileDir);
     log(`Chrome CDP on :${CDP_PORT}`);
 
-    const senderTab = await CdpTab.open(BASE);
-    const receiverTab = await CdpTab.open(BASE);
+    const senderTab = await CdpTab.open(`${BASE}?debug=1`);
+    // The receiver carries the debug hook used to cut the channel mid-transfer.
+    const receiverTab = await CdpTab.open(`${BASE}?debug=1`);
+    activeTabs = { sender: senderTab, receiver: receiverTab };
     log('two tabs open');
 
     let previousHash = null;
@@ -442,6 +496,14 @@ async function main() {
         return;
       }
       log(`session after ${index + 1}: list ${state[0].items}/${state[1].items}, total "${state[0].total}"`);
+
+      // The displayed session total must equal the bytes actually received:
+      // no double counting, no rounding luck.
+      const shownBytes = await receiverTab.evaluate(() => window.polDebug.sessionBytes());
+      if (shownBytes !== expectedTotal) {
+        fail(`session total after file ${index + 1} is ${shownBytes} bytes, expected ${expectedTotal}`);
+        return;
+      }
     }
 
     // --- final session assertions: code kept, exact byte total ---
@@ -464,6 +526,85 @@ async function main() {
       return;
     }
     log(`session kept across ${FILE_SIZES.length} files, code "${roomCode}", promised ${expectedTotal} bytes`);
+
+    // --- the share QR must decode to a link that carries this room code ---
+    const qrMatrix = await senderTab.evaluate(() => {
+      const svg = document.querySelector('#qr svg');
+      const path = svg?.querySelector('path')?.getAttribute('d') ?? '';
+      const size = Number((svg?.getAttribute('viewBox') ?? '').split(' ')[2] ?? 0);
+      if (!size) return null;
+      const modules = Array.from({ length: size }, () => new Array(size).fill(false));
+      for (const match of path.matchAll(/M(\d+) (\d+)h1v1h-1z/g)) {
+        modules[Number(match[2])][Number(match[1])] = true;
+      }
+      return { size, modules };
+    });
+    if (!qrMatrix) {
+      fail('the share QR never appeared in the code card');
+      return;
+    }
+    const qrText = decodeMatrix(qrMatrix.modules);
+    const expectedLink = `${new URL(BASE).origin}/#${roomCode.split(' ').join('-')}`;
+    if (qrText !== expectedLink) {
+      fail(`QR decodes to "${qrText}", expected "${expectedLink}"`);
+      return;
+    }
+    log(`share QR decodes (${qrMatrix.size}x${qrMatrix.size} modules) to the room link`);
+
+    if (process.env.E2E_SCREENSHOT) {
+      const clip = await senderTab.evaluate(() => {
+        const card = document.getElementById('code-card');
+        if (!card) return null;
+        card.scrollIntoView({ block: 'center' });
+        const box = card.getBoundingClientRect();
+        return { x: box.x, y: box.y, width: box.width, height: box.height, scale: 1 };
+      });
+      if (clip) {
+        const shot = await senderTab.send('Page.captureScreenshot', {
+          format: 'png',
+          clip,
+          captureBeyondViewport: true,
+        });
+        const path = `${process.env.TEMP ?? '.'}\\pol-code-card.png`;
+        writeFileSync(path, Buffer.from(shot.data, 'base64'));
+        log(`screenshot of the code card: ${path}`);
+      }
+    }
+
+    // --- PWA plumbing: manifest, icons and the service worker ---
+    const pwa = await senderTab.evaluate(async () => {
+      const manifest = await fetch('/manifest.webmanifest').then((response) =>
+        response.ok ? response.json() : null,
+      );
+      const icons = await Promise.all(
+        ['/icons/icon-192.png', '/icons/icon-512.png'].map(async (path) => {
+          const response = await fetch(path);
+          return response.ok && (await response.blob()).size > 0;
+        }),
+      );
+      let worker = false;
+      try {
+        const registration = await navigator.serviceWorker.getRegistration();
+        worker = Boolean(registration?.active || registration?.installing || registration?.waiting);
+      } catch {
+        worker = false;
+      }
+      return {
+        name: manifest?.name ?? null,
+        start: manifest?.start_url ?? null,
+        icons,
+        worker,
+      };
+    });
+    if (!pwa.name || pwa.start !== '/' || !pwa.icons.every(Boolean)) {
+      fail(`manifest wrong: ${JSON.stringify(pwa)}`);
+      return;
+    }
+    if (!pwa.worker) {
+      fail('the service worker never registered');
+      return;
+    }
+    log(`manifest "${pwa.name}" with both icons, service worker registered`);
 
     // --- text snippet: typed into the textarea, sent with the button ---
     const secret = `pol secret ${Date.now()}`;
@@ -553,6 +694,17 @@ async function main() {
     }
     if (!zipOk) return;
     log(`zip parsed back: ${entries.length} entries, all contents byte-exact, archive hash ${zipHash.slice(0, 12)}…`);
+    previousHash = zipHash;
+
+    // Text and ZIP must be in the total too, at their real byte sizes.
+    const beforeResume = await receiverTab.evaluate(() => window.polDebug.sessionBytes());
+    const expectedBeforeResume =
+      expectedTotal + new TextEncoder().encode(secret).length + zipBytes.length;
+    if (beforeResume !== expectedBeforeResume) {
+      fail(`session total before resume is ${beforeResume}, expected ${expectedBeforeResume}`);
+      return;
+    }
+    log(`session total counts files, text and ZIP exactly: ${beforeResume} bytes`);
 
     // Final count: three files + text + zip = five session entries.
     const count = await receiverTab.evaluate(() => document.querySelectorAll('#session-list li').length);
@@ -561,10 +713,191 @@ async function main() {
       return;
     }
     log(`session list holds ${count} entries — files, text and folder all in one session`);
-    log('E2E PASS (files + text + folder ZIP, one session)');
+
+    // --- resume: cut the wire mid-file; the receiver must continue, not restart ---
+    const opfsReady = await receiverTab.evaluate(() => Boolean(window.polDebug?.hasOpfs()));
+    if (!opfsReady) {
+      fail('OPFS unavailable in this Chrome; the resume half of the test needs it');
+      return;
+    }
+    log('receiver reports OPFS storage available');
+
+    const resumeSize = 96 * 1024 * 1024;
+    const resumeFile = await putFileInSender(senderTab, 'resume.bin', resumeSize);
+    log(`resume file injected: ${resumeFile.size} bytes`);
+
+    // Wait for the first bytes to land, then drop the channel from the receiver.
+    const startDeadline = Date.now() + 60_000;
+    let started = false;
+    while (Date.now() < startDeadline) {
+      const percent = await receiverTab.evaluate(() =>
+        Number(document.getElementById('bar')?.getAttribute('aria-valuenow') ?? 0),
+      );
+      if (percent > 0) {
+        started = true;
+        break;
+      }
+      await sleep(40);
+    }
+    if (!started) {
+      fail('resume file never started arriving');
+      return;
+    }
+    const cutPercent = await receiverTab.evaluate(() => {
+      window.polDebug.interrupt();
+      return Number(document.getElementById('bar')?.getAttribute('aria-valuenow') ?? 0);
+    });
+    log(`channel cut mid-transfer at ${cutPercent}%`);
+
+    // The receiver auto-rejoins the room and asks for the rest of the file.
+    let sawResume = false;
+    let resumeResult = null;
+    let lastAlert = null;
+    const resumeDeadline = Date.now() + 180_000;
+    while (Date.now() < resumeDeadline) {
+      const snapshot = await receiverTab.evaluate(() => {
+        const status = document.getElementById('status')?.textContent ?? '';
+        const result = document.getElementById('result');
+        const hash = document.getElementById('result-hash');
+        const alert = document.getElementById('alert');
+        const alertVisible = alert && !alert.hidden && alert.textContent.trim().length > 0;
+        return {
+          status,
+          alert: alertVisible ? alert.textContent.trim() : null,
+          visible: Boolean(result && !result.hidden),
+          hash: result && !result.hidden && hash ? hash.textContent.trim() : null,
+        };
+      });
+      if (snapshot.status.includes('ادامه')) sawResume = true;
+      // The "connection dropped" card is transient: the page retries by itself.
+      if (snapshot.alert) lastAlert = snapshot.alert;
+      if (snapshot.visible && snapshot.hash && !snapshot.hash.includes(previousHash ?? '___')) {
+        resumeResult = snapshot;
+        break;
+      }
+      await sleep(120);
+    }
+    if (!resumeResult) {
+      fail(`receiver never finished the resumed file${lastAlert ? ` (last alert: ${lastAlert})` : ''}`);
+      return;
+    }
+    if (!sawResume) {
+      fail('receiver never announced a resume; it may have restarted from zero');
+      return;
+    }
+    const resumeHash = (resumeResult.hash.match(/[0-9a-f]{64}/) ?? [])[0];
+    if (resumeHash !== resumeFile.sha256) {
+      const got = await receiverTab.evaluate(() => window.polDebug?.lastReceive() ?? null);
+      fail(
+        `resumed file hash mismatch\n  expected ${resumeFile.sha256}\n  received ${resumeHash}` +
+          (got ? `\n  receiver stored ${got.size} of ${got.expected} bytes (ok=${got.ok})` : ''),
+      );
+      return;
+    }
+    log(`resumed file verified: ${resumeHash.slice(0, 12)}… (continued from ${cutPercent}%)`);
+
+    // The resumed file is one more session entry, and the total was not
+    // counted twice for it.
+    const afterResume = await receiverTab.evaluate(() => ({
+      items: document.querySelectorAll('#session-list li').length,
+      total: document.getElementById('session-total')?.textContent ?? '',
+      bytes: window.polDebug.sessionBytes(),
+    }));
+    if (afterResume.items !== FILE_SIZES.length + 3) {
+      fail(`session count after resume wrong: ${afterResume.items}, expected ${FILE_SIZES.length + 3}`);
+      return;
+    }
+    if (afterResume.bytes !== beforeResume + resumeFile.size) {
+      fail(
+        `resumed file counted wrong: total ${afterResume.bytes}, expected ${beforeResume + resumeFile.size}`,
+      );
+      return;
+    }
+    log(`session list holds ${afterResume.items} entries, total "${afterResume.total}" — resume counted once`);
+
+    // --- resume across a page reload: the partial file survives on disk ---
+    await receiverTab.evaluate(() => window.polDebug.stopRetries());
+    const reloadSize = 64 * 1024 * 1024;
+    const reloadFile = await putFileInSender(senderTab, 'reload.bin', reloadSize);
+    log(`reload-resume file injected: ${reloadFile.size} bytes`);
+
+    const reloadStart = Date.now() + 60_000;
+    let reloadPercent = 0;
+    while (Date.now() < reloadStart) {
+      reloadPercent = await receiverTab.evaluate(() =>
+        Number(document.getElementById('bar')?.getAttribute('aria-valuenow') ?? 0),
+      );
+      if (reloadPercent > 0) break;
+      await sleep(40);
+    }
+    if (reloadPercent === 0) {
+      fail('reload-resume file never started arriving');
+      return;
+    }
+    await receiverTab.evaluate(() => window.polDebug.interrupt());
+    log(`channel cut at ${reloadPercent}%, then the receiver page is reloaded`);
+    // Give the store time to close its file and write the resume record.
+    await sleep(1200);
+    await receiverTab.reload();
+    await submitCode(receiverTab, roomCode);
+    log('receiver reloaded and rejoined the same room');
+
+    let sawReloadResume = false;
+    let reloadResult = null;
+    let reloadAlert = null;
+    const reloadDeadline = Date.now() + 240_000;
+    while (Date.now() < reloadDeadline) {
+      const snapshot = await receiverTab.evaluate(() => {
+        const status = document.getElementById('status')?.textContent ?? '';
+        const result = document.getElementById('result');
+        const hash = document.getElementById('result-hash');
+        const alert = document.getElementById('alert');
+        const alertVisible = alert && !alert.hidden && alert.textContent.trim().length > 0;
+        return {
+          status,
+          alert: alertVisible ? alert.textContent.trim() : null,
+          visible: Boolean(result && !result.hidden),
+          hash: result && !result.hidden && hash ? hash.textContent.trim() : null,
+        };
+      });
+      if (snapshot.status.includes('ادامه')) sawReloadResume = true;
+      if (snapshot.alert) reloadAlert = snapshot.alert;
+      if (snapshot.visible && snapshot.hash) {
+        reloadResult = snapshot;
+        break;
+      }
+      await sleep(150);
+    }
+    if (!reloadResult) {
+      fail(`reload resume never finished${reloadAlert ? ` (last alert: ${reloadAlert})` : ''}`);
+      return;
+    }
+    if (!sawReloadResume) {
+      fail('receiver after reload never announced a resume; it likely restarted from zero');
+      return;
+    }
+    const reloadHash = (reloadResult.hash.match(/[0-9a-f]{64}/) ?? [])[0];
+    if (reloadHash !== reloadFile.sha256) {
+      fail(`reload-resumed hash mismatch\n  expected ${reloadFile.sha256}\n  received ${reloadHash}`);
+      return;
+    }
+    const reloadSession = await receiverTab.evaluate(() => ({
+      items: document.querySelectorAll('#session-list li').length,
+      bytes: window.polDebug.sessionBytes(),
+    }));
+    if (reloadSession.items !== 1 || reloadSession.bytes !== reloadFile.size) {
+      fail(
+        `reload session wrong: ${reloadSession.items} entries, ${reloadSession.bytes} bytes (expected 1 / ${reloadFile.size})`,
+      );
+      return;
+    }
+    log(`reloaded page resumed the file on its own: ${reloadHash.slice(0, 12)}… at ${reloadPercent}%`);
+
+    log('E2E PASS (files + text + folder ZIP + in-page resume + reload resume)');
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   } finally {
+    await dumpTraces();
     chrome?.kill();
     server?.kill();
     // Chrome holds the profile dir for a moment after kill; never let

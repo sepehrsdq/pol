@@ -27,8 +27,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Run the real-Chrome transfer test (three files, one session)
+      - name: Run the real-Chrome transfer test
         run: npm run e2e
+        # Covers: three files, a text snippet, a folder ZIP, a cut-and-resumed
+        # file, a resumed file after a page reload, the share QR and the PWA
+        # manifest/service worker.
 
   image:
     runs-on: ubuntu-latest

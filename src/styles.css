@@ -805,6 +805,38 @@ p {
   animation-delay: 180ms;
 }
 
+/* The share QR: always black on white, whatever the theme, so scanners read it. */
+.qr {
+  width: 148px;
+  height: 148px;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+}
+
+.qr svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.qr svg path {
+  fill: #101010;
+}
+
+.qr[hidden] {
+  display: none;
+}
+
+.install-btn {
+  margin-top: 10px;
+  justify-self: start;
+}
+
 @keyframes chip-in {
   from {
     opacity: 0;

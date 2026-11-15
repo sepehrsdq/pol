@@ -35,6 +35,7 @@ const MIME = new Map([
   ['.mjs', 'text/javascript; charset=utf-8'],
   ['.css', 'text/css; charset=utf-8'],
   ['.json', 'application/json; charset=utf-8'],
+  ['.webmanifest', 'application/manifest+json'],
   ['.svg', 'image/svg+xml'],
   ['.png', 'image/png'],
   ['.jpg', 'image/jpeg'],
@@ -231,11 +232,27 @@ wss.on('connection', (ws) => {
         return;
       }
       const room = rooms.get(key) ?? { sender: null, receiver: null, createdAt: Date.now() };
+      const client = typeof msg.client === 'string' && msg.client.length <= 64 ? msg.client : '';
       if (room[role]) {
-        send(ws, { t: 'full' });
-        return;
+        const stale = room[role];
+        // Only the same browser tab may take its own seat back after a drop.
+        // A different device gets "full", exactly as before.
+        if (!client || stale.polClient !== client) {
+          send(ws, { t: 'full' });
+          return;
+        }
+        room[role] = null;
+        stale.polRoom = undefined;
+        stale.polRole = undefined;
+        send(stale, { t: 'replaced' });
+        try {
+          stale.close(4000, 'replaced');
+        } catch {
+          /* already closing */
+        }
       }
       room[role] = ws;
+      ws.polClient = client;
       rooms.set(key, room);
       ws.polRoom = key;
       ws.polRole = role;
