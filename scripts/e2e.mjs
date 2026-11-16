@@ -302,6 +302,17 @@ async function submitCode(receiverTab, code) {
   if (!submitted) throw new Error('code submit failed');
 }
 
+/** Wait until both sides computed the comparable session words. */
+async function waitForFingerprint(tab, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const words = await tab.evaluate(() => window.polDebug?.fingerprint?.() ?? []);
+    if (words && words.length > 0) return words;
+    await sleep(500);
+  }
+  return [];
+}
+
 async function waitForReceiverResult(receiverTab, timeoutMs = 60_000, previousHash = null, wantedMime = null) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
@@ -468,6 +479,20 @@ async function main() {
         log(`room code: ${code}`);
         await submitCode(receiverTab, code);
         roomCode = code;
+
+        // After the first transfer completes, both screens must show the same
+        // six security words (SPAKE2 + DTLS binding). This is the v0.7 MITM
+        // detection surface and runs on every session.
+        const fps = await Promise.all([
+          waitForFingerprint(senderTab),
+          waitForFingerprint(receiverTab),
+        ]);
+        const [senderWords, receiverWords] = fps;
+        if (!senderWords.length || senderWords.join(' ') !== receiverWords.join(' ')) {
+          fail(`fingerprint mismatch\n  sender:   ${senderWords.join(' ')}\n  receiver: ${receiverWords.join(' ')}`);
+          return;
+        }
+        log(`session fingerprint matched on both sides: ${senderWords.join(' ')}`);
       }
 
       const result = await waitForReceiverResult(receiverTab, 90_000, previousHash);
@@ -893,7 +918,32 @@ async function main() {
     }
     log(`reloaded page resumed the file on its own: ${reloadHash.slice(0, 12)}… at ${reloadPercent}%`);
 
-    log('E2E PASS (files + text + folder ZIP + in-page resume + reload resume)');
+    // A code with words outside the pool never even opens a connection — that
+    // is input validation, not the handshake. The handshake failure paths
+    // (forged confirmP/confirmV, mismatched keys) are covered in
+    // spake2.test.ts; simulating a real signalling MITM would need a hostile
+    // relay, which this harness deliberately does not fake.
+    const rejectProbe = await CdpTab.open(`${BASE}?debug=1`);
+    try {
+      await submitCode(rejectProbe, 'درخت باران ابر اسب');
+      await sleep(1200);
+      const rejected = await rejectProbe.evaluate(() => {
+        const alert = document.getElementById('alert');
+        return {
+          alert: alert && !alert.hidden ? alert.textContent.trim() : null,
+          fingerprint: document.getElementById('fingerprint')?.hidden !== false,
+        };
+      });
+      if (!rejected.alert) {
+        fail('an invalid code was accepted without a visible alert');
+        return;
+      }
+      log(`invalid code rejected at input: "${rejected.alert.slice(0, 40)}…"`);
+    } finally {
+      rejectProbe.close();
+    }
+
+    log('E2E PASS (files + text + folder ZIP + fingerprint match + in-page resume + reload resume)');
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   } finally {

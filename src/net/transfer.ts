@@ -10,6 +10,8 @@ import {
 import { buildZip, zipSize, type ZipEntry } from '../lib/zip';
 import { trace } from '../lib/trace';
 import { DEFAULT_TUNING, isAboveHighWater, resolveTuning, type TransferTuning } from '../lib/tuning';
+import { proverStart, proverFinish, verifierStart, verifierFinish } from '../lib/spake2';
+import { fingerprintWords, fingerprintsFromSdp } from '../lib/fingerprint';
 
 /** Mutable so a benchmark can measure several configurations in one build. */
 let tuning: TransferTuning = { ...DEFAULT_TUNING };
@@ -78,7 +80,8 @@ export type TransferError =
   | 'channel-closed'
   | 'send-failed'
   | 'file-too-large'
-  | 'storage-failed';
+  | 'storage-failed'
+  | 'verify-failed';
 
 /** What the browser managed to gather, so a failure can be explained. */
 export interface TransferDiagnostics {
@@ -109,10 +112,26 @@ export interface TransferEvents {
   onVerified: (result: VerifyResult) => void;
   onAck: (ok: boolean, size?: number) => void;
   onError: (error: TransferError, detail?: TransferDiagnostics) => void;
+  /** SPAKE2 key confirmation finished; the comparable words are on screen. */
+  onFingerprint?: (words: string[]) => void;
+  /** The handshake failed: the room code on the two sides does not match. */
+  onHandshakeFailed?: () => void;
 }
 
-function waitDrain(channel: RTCDataChannel): Promise<void> {
-  return new Promise((resolve, reject) => {
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.replace(/[^0-9a-f]/gi, '');
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function waitDrain(channel: RTCDataChannel): Promise<void> {  return new Promise((resolve, reject) => {
     const cleanup = (): void => {
       channel.removeEventListener('bufferedamountlow', handleLow);
       channel.removeEventListener('close', handleClose);
@@ -210,6 +229,12 @@ export class Transfer {
   /** Sender side: offset a resuming receiver asked for, resolved once. */
   private readyOffset: number | null = null;
   private readyResolver: (() => void) | null = null;
+
+  /* ---- SPAKE2 handshake state (v0.7) ---- */
+  private spakeDone = false;
+  private spakeProver: ReturnType<typeof proverStart> | null = null;
+  private spakeVerifier: ReturnType<typeof verifierStart> | null = null;
+  private spakePassword = '';
 
   constructor(
     role: TransferRole,
@@ -368,6 +393,9 @@ export class Transfer {
       window.clearTimeout(this.restartTimer);
       trace('dc open');
       this.events.onState('open');
+      // The SPAKE2 handshake rides the freshly opened channel, before any
+      // file byte. The sender speaks first (Prover), matching the SDP offer.
+      if (this.spakePassword && !this.spakeDone) this.beginHandshake();
     });
 
     channel.addEventListener('close', () => {
@@ -400,7 +428,6 @@ export class Transfer {
     this.startGiveUpTimer(CONNECT_TIMEOUT_MS);
     this.scheduleRestart();
   }
-
   async handleSignal(payload: SignalPayload): Promise<void> {
     trace('signal-in', payload.kind);
     if (payload.kind === 'ice') {
@@ -410,6 +437,7 @@ export class Transfer {
     }
 
     await this.pc.setRemoteDescription({ type: payload.kind, sdp: payload.sdp });
+    this.remoteSdp = payload.sdp;
 
     for (const candidate of this.pendingIce) {
       await this.pc.addIceCandidate(candidate);
@@ -705,7 +733,121 @@ export class Transfer {
     if (message.kind === 'done') {
       this.finished = true;
       this.events.onAck(Boolean(message.ok), typeof message.size === 'number' ? message.size : undefined);
+      return;
     }
+
+    if (message.kind === 'spake') this.handleSpake(message);
+  }
+
+  /* ---- SPAKE2 over the data channel ---- */
+
+  /**
+   * Arm the handshake: the room code is the password, and the local SDP is
+   * captured for fingerprint binding. The sender fires on channel-open; the
+   * receiver just waits for the sender's share.
+   */
+  armHandshake(password: string, localSdp: string | null): void {
+    this.spakePassword = password;
+    this.spakeDone = false;
+    if (this.role === 'sender') {
+      this.spakeProver = proverStart(password);
+      // The offer SDP may not exist yet at arm time (arm happens after
+      // setLocalDescription in the normal flow); it is re-read when the
+      // fingerprint is computed.
+      this.localSdp = localSdp;
+    }
+  }
+
+  private localSdp: string | null = null;
+
+  private beginHandshake(): void {
+    const channel = this.channel;
+    if (!channel || this.role !== 'sender' || !this.spakeProver) return;
+    channel.send(
+      JSON.stringify({ kind: 'spake', step: 'share', share: bytesToHex(this.spakeProver.shareP) }),
+    );
+    trace('spake share sent');
+  }
+
+  private handleSpake(message: Record<string, unknown>): void {
+    const step = message.step;
+    try {
+      if (step === 'share' && this.role === 'receiver') {
+        // Round 1 in: derive Y and confirmV, send both together.
+        const shareP = hexToBytes(String(message.share ?? ''));
+        this.spakeVerifier = verifierStart(this.spakePassword, shareP);
+        this.channel?.send(
+          JSON.stringify({
+            kind: 'spake',
+            step: 'confirm',
+            share: bytesToHex(this.spakeVerifier.shareV),
+            confirm: bytesToHex(this.spakeVerifier.confirmV),
+          }),
+        );
+        trace('spake confirm sent');
+        return;
+      }
+
+      if (step === 'confirm' && this.role === 'sender' && this.spakeProver) {
+        const shareV = hexToBytes(String(message.share ?? ''));
+        const confirmV = hexToBytes(String(message.confirm ?? ''));
+        const finished = proverFinish(this.spakeProver.state, shareV, confirmV);
+        this.channel?.send(
+          JSON.stringify({ kind: 'spake', step: 'finish', confirm: bytesToHex(finished.confirmP) }),
+        );
+        this.spakeDone = true;
+        trace('spake prover done');
+        this.emitFingerprint(finished.kMain, shareV);
+        return;
+      }
+
+      if (step === 'finish' && this.role === 'receiver' && this.spakeVerifier) {
+        const confirmP = hexToBytes(String(message.confirm ?? ''));
+        const finished = verifierFinish(this.spakeVerifier.state, confirmP);
+        this.spakeDone = true;
+        trace('spake verifier done');
+        this.emitFingerprint(finished.kMain, this.spakeVerifier.state.shareP);
+        return;
+      }
+    } catch (error) {
+      trace('spake failed', error);
+      // Wrong code or tampering: refuse the session loudly, no data flows.
+      this.events.onHandshakeFailed?.();
+    }
+  }
+
+  /**
+   * Mix the negotiated DTLS fingerprints into K_main and publish the six
+   * comparable words. Both sides feed the sender's fingerprint first, so the
+   * words match only when both saw the same SDP pair.
+   */
+  private emitFingerprint(kMain: Uint8Array, peerShare: Uint8Array): void {
+    void peerShare;
+    const local = this.localSdp ?? this.readLocalSdp();
+    const remote = this.remoteSdp;
+    if (!local || !remote) {
+      trace('spake done, fingerprints unavailable');
+      this.events.onFingerprint?.([]);
+      return;
+    }
+    const [localFp] = fingerprintsFromSdp(local);
+    const [remoteFp] = fingerprintsFromSdp(remote);
+    if (!localFp || !remoteFp) {
+      trace('spake done, no fingerprint line');
+      this.events.onFingerprint?.([]);
+      return;
+    }
+    const senderFp = this.role === 'sender' ? localFp : remoteFp;
+    const receiverFp = this.role === 'sender' ? remoteFp : localFp;
+    const words = fingerprintWords(kMain, senderFp, receiverFp, this.spakePassword);
+    trace('fingerprint words ready');
+    this.events.onFingerprint?.(words);
+  }
+
+  private remoteSdp: string | null = null;
+
+  private readLocalSdp(): string | null {
+    return this.pc.localDescription?.sdp ?? null;
   }
 
   /** Prepare storage (resuming when the receiver holds a partial copy). */

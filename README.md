@@ -69,12 +69,15 @@ npm run bench   # real Chrome: throughput of the data channel over several chunk
 
 ```
 index.html          one page, no UI framework
-src/lib/            pure logic: word code, SHA-256, CRC-32, ZIP, QR, OPFS store
+src/lib/            pure logic: word code, SHA-256, CRC-32, ZIP, QR, OPFS store,
+                    P-256/SPAKE2 (RFC 9383), session fingerprint
 src/net/            signaling client and WebRTC transfer
 server/signal.mjs   rooms and SDP/ICE relay (~150 lines)
 ```
 
-The sender creates a data channel and offers; the receiver answers. Files are sliced into 64 KB chunks with backpressure at 4 MB buffered, then verified with SHA-256. A room code is only a room identifier — encryption comes from DTLS, and a key derived from the code (SPAKE2) is planned for v0.7.
+The sender creates a data channel and offers; the receiver answers. Files are sliced into 64 KB chunks with backpressure at 4 MB buffered, then verified with SHA-256.
+
+Before the first byte moves, both sides run SPAKE2+ (RFC 9383, P-256/SHA-256, hand-rolled — the only dependencies are `ws` and dev tooling) over the data channel, with the four-word room code as the password. A wrong code fails key confirmation and the transfer never starts. Both screens then show six security words derived from the SPAKE2 transcript **and** both DTLS fingerprints: a malicious signaling server trying to relay two separate encrypted legs produces different fingerprints on the two sides, so the words visibly mismatch and you abort. The SPAKE2 arithmetic is pinned byte-for-byte by the RFC's test vectors.
 
 Chunk size and watermarks are not guesses: `npm run bench` measures them in a real Chrome, and on the machine measured here (an 8-thread laptop at 1.4 GHz) the data channel is the bottleneck — the sender spends 70–85% of the file window waiting for it to accept more, and every chunk size and watermark tested lands within run-to-run noise of 64 KB (see `docs/benchmark.md`).
 
@@ -86,7 +89,7 @@ Known limits:
 - One code per session, but many payloads per session: files, text snippets and folders (as ZIP) ride the same room until you press «پایان نشست».
 - A partial file stays on disk for the next attempt (same name, size and last-modified) and is swept on a later page load; old partials are not kept as a library.
 - Installed, the app opens offline, but a transfer still needs the signaling server to introduce the two browsers.
-- If the signal server is malicious it could theoretically sit in the middle. The code does not protect against that yet.
+- The four-word code has ~24 bits of entropy. It is per-session and the server rate-limits joins, so online guessing is bounded by the room's short lifetime — but the password is not designed to survive an offline brute-force of a recorded session.
 
 ## فارسی
 
@@ -102,7 +105,7 @@ npm run dev:signal   # ترمینال اول
 npm run dev          # ترمینال دوم
 ```
 
-- کد چهارکلمه‌ای فقط شناسهٔ اتاق است، نه رمز. رمزنگاری از خود WebRTC می‌آید.
+- **کد امنیتی نشست:** قبل از هر انتقال، کلید با SPAKE2 (استاندارد RFC 9383) از خود کد اتاق مشتق می‌شود؛ کد اشتباه یعنی انتقال هرگز شروع نمی‌شود. بعد از وصل‌شدن، هر دو صفحه شش کلمهٔ امنیتی نشان می‌دهند — اگر روی دو طرف یکی نبود، مسیر دستکاری شده و باید قطع کنی.
 - STUN داخل خود برنامه است، پس بیشتر شبکه‌های خانگی مستقیم وصل می‌شوند. انتقال بین دو شبکهٔ جدا از رلهٔ TURN می‌گذرد و فعلاً سقف ۲۰۰ مگابایت دارد.
 - هر نشست چند چیز: فایل، متن/کلیپ‌بورد و پوشه (به‌صورت ZIP) روی همان اتاق می‌روند تا «پایان نشست» را بزنی.
 - **قطع شد؟ ادامه می‌دهد.** گیرنده بایت‌ها را روی دیسک مرورگر (OPFS) می‌نویسد؛ اگر اتصال قطع شود یا صفحه رفرش شود، همان فایل از همان بایت ادامه می‌یابد و هش نهایی همچنان کل فایل را می‌سنجد.

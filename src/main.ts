@@ -62,6 +62,8 @@ const joinForm = el<HTMLFormElement>('join-form');
 const codeInput = el<HTMLInputElement>('code-input');
 const alertBox = el<HTMLParagraphElement>('alert');
 const statusLine = el<HTMLParagraphElement>('status');
+const fingerprintCard = el<HTMLDivElement>('fingerprint');
+const fingerprintWords = el<HTMLDivElement>('fingerprint-words');
 const progressCard = el<HTMLDivElement>('progress-card');
 const progressName = el<HTMLSpanElement>('progress-name');
 const progressPct = el<HTMLSpanElement>('progress-pct');
@@ -269,6 +271,8 @@ let receiveEndedAt = 0;
 let receiveLastProgressAt = 0;
 /** Automatic reconnects after a dropped channel, so a loop cannot spin. */
 let reconnectAttempts = 0;
+/** Comparable session words this side computed (debug/test hook). */
+let lastFingerprintWords: string[] = [];
 /** The e2e reload test turns this off to simulate a user who walks away. */
 let autoRetry = true;
 
@@ -291,6 +295,7 @@ function setMode(next: 'send' | 'receive'): void {
   hideResult();
   progressCard.hidden = true;
   sessionFiles.hidden = true;
+  hideFingerprint();
   setStatus(null);
 }
 
@@ -510,6 +515,7 @@ function restartPeer(role: TransferRole, delay = 0, quiet = false): void {
     if (attempt !== connectAttempt || !signal) return;
     transfer?.close();
     transfer = buildTransfer(role, iceServers);
+    if (activeWords) transfer.armHandshake(formatCode(activeWords), null);
     hideAlert();
     if (quiet) {
       if (role === 'sender') void transfer.startOffer();
@@ -534,6 +540,7 @@ function reset(): void {
   progressCard.hidden = true;
   hideResult();
   hideAlert();
+  hideFingerprint();
   codeCard.hidden = true;
 }
 
@@ -712,8 +719,21 @@ function buildTransfer(role: TransferRole, iceServers: RTCIceServer[]): Transfer
       sessionClose.hidden = false;
       sessionClose.textContent = 'پایان نشست';
     },
-    onAck: (ok, size) => {
+    onFingerprint: (words) => {
       if (!live()) return;
+      showFingerprint(words);
+    },
+    onHandshakeFailed: () => {
+      if (!live()) return;
+      busy = false;
+      bridge.classList.remove('is-active');
+      setStatus(null);
+      hideResult();
+      resetProgress();
+      progressCard.hidden = true;
+      showAlert('کد دو طرف هم‌خوانی ندارد یا مسیر دستکاری شده. یک کد تازه بگیر و دوباره تلاش کن.');
+    },
+    onAck: (ok, size) => {      if (!live()) return;
       busy = false;
       countedSendKey = null;
       // The receiver has confirmed (or rejected) the file, so a later
@@ -813,6 +833,7 @@ async function connect(role: TransferRole, room: string): Promise<void> {
 
   iceServers = ice.servers;
   transfer = buildTransfer(role, ice.servers);
+  if (activeWords) transfer.armHandshake(formatCode(activeWords), null);
   // Every socket for this tab carries the same client id, so the server can
   // hand our own seat back after a drop without ever kicking the peer.
   let client: SignalClient | null = null;
@@ -1051,6 +1072,30 @@ function commonRoot(files: File[]): string {
     if (!path.startsWith(`${root}/`)) return '';
   }
   return root;
+}
+
+/** Show the comparable session words once the SPAKE2 handshake completes. */
+function showFingerprint(words: string[]): void {
+  lastFingerprintWords = words;
+  fingerprintWords.replaceChildren();
+  if (words.length === 0) {
+    fingerprintCard.hidden = true;
+    return;
+  }
+  fingerprintWords.replaceChildren(
+    ...words.map((word) => {
+      const span = document.createElement('span');
+      span.textContent = word;
+      return span;
+    }),
+  );
+  fingerprintCard.hidden = false;
+}
+
+function hideFingerprint(): void {
+  lastFingerprintWords = [];
+  fingerprintCard.hidden = true;
+  fingerprintWords.replaceChildren();
 }
 
 /** Strip "root/" from a webkitRelativePath; keeps inner folders intact. */
@@ -1409,6 +1454,8 @@ if (new URLSearchParams(location.search).has('debug')) {
     }),
     /** Where the last transfer spent its time, in ms. */
     stats: () => transfer?.timings() ?? null,
+    /** The comparable session words this side computed after the handshake. */
+    fingerprint: () => lastFingerprintWords,
     /** Stop the automatic rejoin so a reload can be tested as a clean start. */
     stopRetries: () => {
       autoRetry = false;
