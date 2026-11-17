@@ -21,6 +21,8 @@ Send a file straight from one browser to another. Pick a file, get four words, h
 - **Four-word code** — four Persian words from a 64-word list, easy to read over the phone and type on a mobile keyboard.
 - **Direct transfer** — file bytes only use the data channel. The signal server introduces the two browsers and relays SDP/ICE; it never sees the file.
 - **Integrity check** — both sides hash while the bytes move, and the digest rides along with the last control message. There is no separate pass over the file, so a large file starts sending right away and never needs its size in RAM twice.
+- **Terminal client** — `npm run cli send <file>` prints a room code; `npm run cli receive <four words>` joins and saves. The CLI runs the same SPAKE2 handshake and shows the same six-word session fingerprint, so a terminal and a browser interoperate as two peers. Native WebRTC via `node-datachannel`, prebuilt for Windows, macOS and Linux.
+- **Authenticated pairing** — the room code derives a session key with SPAKE2+ (RFC 9383). A wrong code fails key confirmation and nothing transfers. After connecting, both screens show six security words derived from the transcript and both DTLS fingerprints: a tampering man-in-the-middle makes the two sides disagree, visibly.
 - **Persian and RTL** — right-to-left interface, light and dark themes, Vazirmatn bundled locally. No external CDN.
 
 ## Run it
@@ -72,12 +74,13 @@ index.html          one page, no UI framework
 src/lib/            pure logic: word code, SHA-256, CRC-32, ZIP, QR, OPFS store,
                     P-256/SPAKE2 (RFC 9383), session fingerprint
 src/net/            signaling client and WebRTC transfer
+cli/pol.ts          terminal client — same protocol, same handshake
 server/signal.mjs   rooms and SDP/ICE relay (~150 lines)
 ```
 
 The sender creates a data channel and offers; the receiver answers. Files are sliced into 64 KB chunks with backpressure at 4 MB buffered, then verified with SHA-256.
 
-Before the first byte moves, both sides run SPAKE2+ (RFC 9383, P-256/SHA-256, hand-rolled — the only dependencies are `ws` and dev tooling) over the data channel, with the four-word room code as the password. A wrong code fails key confirmation and the transfer never starts. Both screens then show six security words derived from the SPAKE2 transcript **and** both DTLS fingerprints: a malicious signaling server trying to relay two separate encrypted legs produces different fingerprints on the two sides, so the words visibly mismatch and you abort. The SPAKE2 arithmetic is pinned byte-for-byte by the RFC's test vectors.
+Before the first byte moves, both sides run SPAKE2+ (RFC 9383, P-256/SHA-256, hand-rolled — the only dependencies are `ws`, `node-datachannel` and dev tooling) over the data channel, with the four-word room code as the password. A wrong code fails key confirmation and the transfer never starts. Both screens then show six security words derived from the SPAKE2 transcript **and** both DTLS fingerprints: a malicious signaling server trying to relay two separate encrypted legs produces different fingerprints on the two sides, so the words visibly mismatch and you abort. The SPAKE2 arithmetic is pinned byte-for-byte by the RFC's test vectors.
 
 Chunk size and watermarks are not guesses: `npm run bench` measures them in a real Chrome, and on the machine measured here (an 8-thread laptop at 1.4 GHz) the data channel is the bottleneck — the sender spends 70–85% of the file window waiting for it to accept more, and every chunk size and watermark tested lands within run-to-run noise of 64 KB (see `docs/benchmark.md`).
 
@@ -105,7 +108,16 @@ npm run dev:signal   # ترمینال اول
 npm run dev          # ترمینال دوم
 ```
 
-- **کد امنیتی نشست:** قبل از هر انتقال، کلید با SPAKE2 (استاندارد RFC 9383) از خود کد اتاق مشتق می‌شود؛ کد اشتباه یعنی انتقال هرگز شروع نمی‌شود. بعد از وصل‌شدن، هر دو صفحه شش کلمهٔ امنیتی نشان می‌دهند — اگر روی دو طرف یکی نبود، مسیر دستکاری شده و باید قطع کنی.
+**از ترمینال هم می‌شود:** بدون مرورگر، فایل بفرست یا بگیر:
+
+```bash
+npm run cli send report.pdf            # کد می‌گیری و منتظر می‌مانی
+npm run cli receive آب باد ماه گل      # می‌پیوندی و فایل ذخیره می‌شود
+```
+
+CLI و مرورگر دو همتای کامل‌اند: همان کد امنیتی ششکلمهای روی هر دو ظاهر می‌شود و قابل مقایسه است.
+
+- **کد امنیتی نشست:** قبل از هر انتقال، کلید با SPAKE2 (استاندارد RFC 9383) از خود کد اتاق مشتق می‌شود؛ کد اشتباه یعنی انتقال هرگز شروع نمی‌شود. بعد از وصل‌شدن، هر دو طرف (مرورگر یا ترمینال) شش کلمهٔ امنیتی نشان می‌دهند — اگر روی دو طرف یکی نبود، مسیر دستکاری شده و باید قطع کنی.
 - STUN داخل خود برنامه است، پس بیشتر شبکه‌های خانگی مستقیم وصل می‌شوند. انتقال بین دو شبکهٔ جدا از رلهٔ TURN می‌گذرد و فعلاً سقف ۲۰۰ مگابایت دارد.
 - هر نشست چند چیز: فایل، متن/کلیپ‌بورد و پوشه (به‌صورت ZIP) روی همان اتاق می‌روند تا «پایان نشست» را بزنی.
 - **قطع شد؟ ادامه می‌دهد.** گیرنده بایت‌ها را روی دیسک مرورگر (OPFS) می‌نویسد؛ اگر اتصال قطع شود یا صفحه رفرش شود، همان فایل از همان بایت ادامه می‌یابد و هش نهایی همچنان کل فایل را می‌سنجد.
