@@ -13,14 +13,17 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "e2e": "node scripts/e2e.mjs",
+    "cli": "tsx cli/pol.ts",
     "bench": "node scripts/bench.mjs"
   },
   "dependencies": {
+    "node-datachannel": "^0.33.6",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/ws": "^8.5.13",
     "jsqr": "^1.4.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",
     "vitest": "^2.1.8"
