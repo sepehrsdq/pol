@@ -1,7 +1,7 @@
 {
   "name": "pol",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.9.0",
   "type": "module",
   "description": "Browser-to-browser file transfer. Nothing is uploaded.",
   "scripts": {
@@ -13,6 +13,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "e2e": "node scripts/e2e.mjs",
+    "matrix": "node scripts/browser-matrix.mjs",
+    "a11y": "node scripts/a11y-audit.mjs",
     "cli": "tsx cli/pol.ts",
     "bench": "node scripts/bench.mjs"
   },
@@ -23,6 +25,7 @@
   "devDependencies": {
     "@types/ws": "^8.5.13",
     "jsqr": "^1.4.0",
+    "playwright": "^1.65.1",
     "tsx": "^4.23.15",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",
