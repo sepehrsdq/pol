@@ -16,13 +16,14 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
 
-const SIGNAL_PORT = 8899;
-// localhost can resolve to 127.0.0.1, where a local dev gateway on this machine
-// (:8899 collision with ZcodeGateway) answers with its own JSON. ::1 hits our
-// server's dual-stack bind. In production nothing else shares the port.
-const BASE = `http://[::1]:${SIGNAL_PORT}/`;
+const SIGNAL_PORT = Number(process.env.POL_SIGNAL_PORT ?? 8899);
+const SIGNAL_HOST = process.env.POL_HOST ?? '[::1]';
+// ::1 by default: localhost can resolve to 127.0.0.1, where a local dev
+// gateway on the development machine (:8899 collision with ZcodeGateway)
+// answers with its own JSON. ::1 hits our server's dual-stack bind. Override
+// with POL_HOST=localhost on a clean machine.
+const BASE = `http://${SIGNAL_HOST}:${SIGNAL_PORT}/`;
 const FILE_SIZE = 1024 * 1024;
 
 const ENGINES = [
@@ -55,10 +56,6 @@ const ENGINES = [
 ];
 
 const results = [];
-
-async function waitTicks(tab, ms) {
-  await tab.waitForTimeout(ms);
-}
 
 /** Drive one full transfer between two pages in the same browser. */
 async function runEngine(engine) {
@@ -235,9 +232,9 @@ async function firefoxApiCheck() {
   }
 }
 // The signaling server must already be running (npm run dev:signal).
-const health = await fetch(`http://[::1]:${SIGNAL_PORT}/healthz`).catch(() => null);
+const health = await fetch(`${BASE}healthz`).catch(() => null);
 if (!health?.ok) {
-  console.error(`signaling server not reachable on [::1]:${SIGNAL_PORT} — run: npm run dev:signal`);
+  console.error(`signaling server not reachable at ${BASE} — run: npm run dev:signal`);
   process.exit(1);
 }
 

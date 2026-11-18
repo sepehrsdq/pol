@@ -1,14 +1,17 @@
 /**
- * Accessibility audit for Pol: keyboard-only walk of the full user flow,
- * focus ordering, live regions, reduced motion and contrast. Runs against the
- * local build with the local signaling server.
+ * Accessibility audit for Pol: landmarks, accessible names, the focus rule,
+ * live regions, reduced motion and measured contrast in both themes. Runs
+ * against the local build with the local signaling server.
  *
  *   npm run a11y
  */
 import { chromium } from 'playwright';
-import { execSync } from 'node:child_process';
 
-const BASE = `http://[::1]:8899/`;
+const HOST = process.env.POL_HOST ?? '[::1]';
+const PORT = Number(process.env.POL_SIGNAL_PORT ?? 8899);
+// ::1 by default: on the development machine a local gateway owns
+// 127.0.0.1:8899. Override with POL_HOST=localhost on a clean machine.
+const BASE = `http://${HOST}:${PORT}/`;
 const findings = [];
 
 function check(name, ok, detail = '') {
@@ -17,6 +20,11 @@ function check(name, ok, detail = '') {
 }
 
 async function main() {
+  const health = await fetch(`${BASE}healthz`).catch(() => null);
+  if (!health?.ok) {
+    console.error(`signaling server not reachable at ${BASE} — start it with PORT=${PORT} node server/signal.mjs`);
+    process.exit(1);
+  }
   const browser = await chromium.launch();
   const context = await browser.newContext({ reducedMotion: 'reduce' });
   const page = await context.newPage();

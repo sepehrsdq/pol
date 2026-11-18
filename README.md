@@ -4,11 +4,15 @@
 
 # Pol
 
-Send a file straight from one browser to another. Pick a file, get four words, hand them to the other side, and the transfer starts. Bytes travel over a WebRTC data channel: nothing is uploaded, no account is needed, and the server never holds the file.
+Send a file straight from one browser to another. Pick a file, get four Persian words, hand them to the other side, and the transfer starts. Bytes travel over a WebRTC data channel: nothing is uploaded, no account is needed, and the server never holds the file.
 
-**Live demo:** https://qqsp.ir/ — the page and the signaling server are the same origin, so there is nothing to configure.
+**Live:** https://qqsp.ir/ · **v1.0**
 
-> **Same network: direct and unlimited. Different networks: relayed, up to 200 MB.** When both devices share a network the transfer is direct with no size cap. Across networks the traffic goes through a TURN relay, and relay transfers are capped at 200 MB for now.
+<div align="center">
+  <img src="docs/demo.gif" alt="Two browsers transferring a 12 MB file: the sender shows a four-word code and QR, the receiver joins, both show the same six security words, and the verified hash appears on both sides" width="100%" />
+</div>
+
+<sub>One real transfer, recorded by `npm run demo` — sender on the left, receiver on the right, both in one room.</sub>
 
 ## What it does
 
@@ -61,11 +65,27 @@ TURN_PASSWORD=...
 The API key never reaches the browser: the server fetches short-lived credentials, caches them for 10 minutes, and hands those to clients.
 
 ```bash
-npm test        # 90 tests: word codes, sizes, SHA-256, CRC-32, ZIP, QR, OPFS store, ICE, Metered, rooms, tuning
-npm run e2e     # real Chrome: 3 files + text + folder ZIP + two interrupted transfers, one session
+npm test        # 121 unit and server tests: codes, sizes, hashes, CRC-32, ZIP, QR, OPFS, ICE, SPAKE2, rooms, tuning
+npm run e2e     # real Chrome: files, text, folder ZIP, two interrupted transfers, fingerprint match
+npm run matrix  # the same transfer on Chromium, Firefox and WebKit where the platform has WebRTC
+npm run a11y    # 23-point accessibility audit against the live page
+npm run bench   # real Chrome: throughput over several chunk sizes and watermarks
+npm run demo    # re-record docs/demo.gif (needs ffmpeg with GIF support)
 npm run build   # typecheck + production build
-npm run bench   # real Chrome: throughput of the data channel over several chunk sizes and watermarks
 ```
+
+The browser matrix runs Chromium end to end. On this Windows machine playwright's WebKit has no WebRTC at all and its Firefox gathers no ICE candidates, so those two are checked at the API surface and skipped with an explicit message — Safari and Firefox still need a real macOS/Linux run. Details in [docs/testing.md](docs/testing.md).
+
+In production the same server serves `dist/` and `/signal`, so there is one origin and no CORS: `npm run build && npm start`, or the included `Dockerfile`.
+
+### Terminal
+
+```bash
+npm run cli send report.pdf            # prints a code, waits
+npm run cli receive آب باد ماه گل      # joins and saves
+```
+
+`POL_SIGNAL_URL` and `POL_OUT` override the server and the output directory.
 
 ## How it works
 
@@ -80,25 +100,26 @@ server/signal.mjs   rooms and SDP/ICE relay (~150 lines)
 
 The sender creates a data channel and offers; the receiver answers. Files are sliced into 64 KB chunks with backpressure at 4 MB buffered, then verified with SHA-256.
 
-Before the first byte moves, both sides run SPAKE2+ (RFC 9383, P-256/SHA-256, hand-rolled — the only dependencies are `ws`, `node-datachannel` and dev tooling) over the data channel, with the four-word room code as the password. A wrong code fails key confirmation and the transfer never starts. Both screens then show six security words derived from the SPAKE2 transcript **and** both DTLS fingerprints: a malicious signaling server trying to relay two separate encrypted legs produces different fingerprints on the two sides, so the words visibly mismatch and you abort. The SPAKE2 arithmetic is pinned byte-for-byte by the RFC's test vectors.
-
-Chunk size and watermarks are not guesses: `npm run bench` measures them in a real Chrome, and on the machine measured here (an 8-thread laptop at 1.4 GHz) the data channel is the bottleneck — the sender spends 70–85% of the file window waiting for it to accept more, and every chunk size and watermark tested lands within run-to-run noise of 64 KB (see `docs/benchmark.md`).
+Before the first byte moves, both sides run SPAKE2+ (RFC 9383, P-256/SHA-256, hand-rolled — the only runtime dependencies are `ws` and `node-datachannel`) over the data channel, with the four-word room code as the password. A wrong code fails key confirmation and the transfer never starts. Both screens then show six security words derived from the SPAKE2 transcript **and** both DTLS fingerprints: a malicious signaling server trying to relay two separate encrypted legs produces different fingerprints on the two sides, so the words visibly mismatch and you abort. The SPAKE2 arithmetic is pinned byte-for-byte by the RFC's test vectors.
 
 When the receiver supports the origin private file system (every current Chromium and Firefox), bytes are written to disk as they arrive instead of piling up in the tab. The receiver answers each file announcement with a `ready` carrying its byte offset, so a resumed file continues where it stopped while the sender still hashes the whole file from the first byte.
 
-Known limits:
+Chunk size and watermarks are not guesses: `npm run bench` measures them in a real Chrome, and on the machine measured here — an 8-thread laptop at 1.4 GHz — the data channel is the bottleneck: the sender spends 70–85% of the file window waiting for it to accept more, and every chunk size and watermark tested lands within run-to-run noise of 64 KB (see [docs/benchmark.md](docs/benchmark.md)).
+
+### Known limits
 
 - STUN is built in, so most home networks connect directly. Cross-network transfers go through a TURN relay and are capped at 200 MB for now; symmetric NAT and restrictive firewalls can still block even the relay path in rare cases.
 - One code per session, but many payloads per session: files, text snippets and folders (as ZIP) ride the same room until you press «پایان نشست».
 - A partial file stays on disk for the next attempt (same name, size and last-modified) and is swept on a later page load; old partials are not kept as a library.
 - Installed, the app opens offline, but a transfer still needs the signaling server to introduce the two browsers.
 - The four-word code has ~24 bits of entropy. It is per-session and the server rate-limits joins, so online guessing is bounded by the room's short lifetime — but the password is not designed to survive an offline brute-force of a recorded session.
+- Safari is not verified in this repo's test runs; the app falls back to memory when OPFS is unavailable.
 
 ## فارسی
 
 **پل** یک ایردراپ مرورگری است: فایل را روی یک دستگاه انتخاب می‌کنی، یک کد چهارکلمه‌ای می‌گیری، طرف مقابل کد را می‌زند و فایل مستقیم بین دو مرورگر جابه‌جا می‌شود. هیچ فایلی آپلود نمی‌شود و هیچ اکانتی لازم نیست. در یک نشست می‌توانی چند فایل پشت‌سرهم بفرستی.
 
-دموی زنده: https://qqsp.ir/
+دموی زنده: https://qqsp.ir/ — نسخهٔ ۱٫۰.
 
 **یک شبکه: مستقیم و بدون سقف. شبکه‌های جدا: با رله، تا ۲۰۰ مگابایت.** وقتی هر دو دستگاه روی یک شبکه‌اند، فایل مستقیم و بدون محدودیت حجم جابه‌جا می‌شود. بین دو شبکهٔ جدا ترافیک از رلهٔ TURN می‌گذرد و فعلاً تا ۲۰۰ مگابایت پذیرفته می‌شود.
 
@@ -115,7 +136,7 @@ npm run cli send report.pdf            # کد می‌گیری و منتظر می
 npm run cli receive آب باد ماه گل      # می‌پیوندی و فایل ذخیره می‌شود
 ```
 
-CLI و مرورگر دو همتای کامل‌اند: همان کد امنیتی ششکلمهای روی هر دو ظاهر می‌شود و قابل مقایسه است.
+CLI و مرورگر دو همتای کامل‌اند: همان کد امنیتی شش‌کلمه‌ای روی هر دو ظاهر می‌شود و قابل مقایسه است.
 
 - **کد امنیتی نشست:** قبل از هر انتقال، کلید با SPAKE2 (استاندارد RFC 9383) از خود کد اتاق مشتق می‌شود؛ کد اشتباه یعنی انتقال هرگز شروع نمی‌شود. بعد از وصل‌شدن، هر دو طرف (مرورگر یا ترمینال) شش کلمهٔ امنیتی نشان می‌دهند — اگر روی دو طرف یکی نبود، مسیر دستکاری شده و باید قطع کنی.
 - STUN داخل خود برنامه است، پس بیشتر شبکه‌های خانگی مستقیم وصل می‌شوند. انتقال بین دو شبکهٔ جدا از رلهٔ TURN می‌گذرد و فعلاً سقف ۲۰۰ مگابایت دارد.
@@ -123,7 +144,8 @@ CLI و مرورگر دو همتای کامل‌اند: همان کد امنیت�
 - **قطع شد؟ ادامه می‌دهد.** گیرنده بایت‌ها را روی دیسک مرورگر (OPFS) می‌نویسد؛ اگر اتصال قطع شود یا صفحه رفرش شود، همان فایل از همان بایت ادامه می‌یابد و هش نهایی همچنان کل فایل را می‌سنجد.
 - **QR:** کد اتاق به‌شکل QR هم هست؛ با دوربین گوشی بخوان تا مستقیم وارد همان نشست شود. پل روی گوشی و لپ‌تاپ نصب‌شدنی است و آفلاین هم باز می‌شود (برای انتقال، سرور معرفی لازم است).
 - سلامت فایل با SHA-256 بررسی می‌شود و در پایان، نتیجه روی هر دو طرف دیده می‌شود. هش هم‌زمان با ارسال حساب می‌شود، پس فایل بزرگ قبل از شروع یک دور اضافه خوانده نمی‌شود.
+- **محدودیت صادقانه:** کد چهارکلمه‌ای حدود ۲۴ بیت آنتروپی دارد؛ برای حدس آنلاین در عمر کوتاه اتاق کافی است، اما در برابر حملهٔ آفلاین روی نشست ضبط‌شده طراحی نشده است.
 
 ## License
 
-MIT
+MIT. Issues and questions: [github.com/sepehrsdq/pol](https://github.com/sepehrsdq/pol).

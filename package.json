@@ -1,7 +1,7 @@
 {
   "name": "pol",
   "private": true,
-  "version": "0.9.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "Browser-to-browser file transfer. Nothing is uploaded.",
   "scripts": {
@@ -15,6 +15,7 @@
     "e2e": "node scripts/e2e.mjs",
     "matrix": "node scripts/browser-matrix.mjs",
     "a11y": "node scripts/a11y-audit.mjs",
+    "demo": "node scripts/demo.mjs",
     "cli": "tsx cli/pol.ts",
     "bench": "node scripts/bench.mjs"
   },
